@@ -22,6 +22,10 @@ Make sure the library works.
 ```python
 import maxmind
 
-r = maxmind.Reader('GeoLite2-City.mmdb')
-r.lookup('89.160.20.128')
+with maxmind.Reader('GeoLite2-City.mmdb') as db:
+    db.lookup('0.0.0.0') is None
+    db.lookup('89.160.20.128')['city']['names']['en']
+
+True
+'Karlstad'
 ```

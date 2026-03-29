@@ -5,45 +5,69 @@ const maxminddb = @import("maxminddb");
 
 const allocator = std.heap.smp_allocator;
 
+/// Reads MaxMind DB files.
 pub const Reader = struct {
     db: maxminddb.Reader,
+    is_closed: bool,
+
+    const Self = @This();
 
     /// Opens a MaxMind DB file, for example:
     /// r = maxmind.Reader('GeoLite2-City.mmdb')
     pub fn __new__(path: []const u8) !Reader {
         return .{
             .db = try maxminddb.Reader.mmap(allocator, path, .{}),
+            .is_closed = false,
         };
     }
 
     /// Closes a db when the Reader is deleted, for example:
     /// del r
-    pub fn __del__(self: *Reader) void {
-        self.db.close();
+    pub fn __del__(self: *Self) void {
+        self.close();
     }
 
-    pub fn lookup(self: *Reader, ip_address: []const u8) ?*pyoz.PyObject {
-        const ip = std.net.Address.parseIp(ip_address, 0) catch |err| {
-            std.debug.print("address {any}", .{err});
-            return null;
-        };
+    /// Context manager protocol, for example:
+    /// with maxmind.Reader('GeoLite2-City.mmdb') as r:
+    ///     r.lookup('89.160.20.129')
+    pub fn __enter__(self: *Self) *Self {
+        return self;
+    }
 
-        const r = self.db.lookup(maxminddb.any.Value, allocator, ip, .{}) catch |err| {
-            std.debug.print("lookup {any}", .{err});
-            return null;
-        };
-        if (r == null) {
-            std.debug.print("not found", .{});
-            return null;
+    /// Closes the Reader when a context is exited.
+    pub fn __exit__(self: *Self) bool {
+        self.close();
+        // Do not suppress exceptions.
+        return false;
+    }
+
+    /// Closes the Reader to free all resources.
+    pub fn close(self: *Self) void {
+        if (!self.is_closed) {
+            self.is_closed = true;
+            self.db.close();
         }
-        defer r.?.deinit();
+    }
 
-        std.debug.print("record {any}", .{r});
+    /// Looks up a record by an IP address.
+    pub fn lookup(self: *Self, ip_address: []const u8) ?*pyoz.PyObject {
+        const ip = std.net.Address.parseIp(ip_address, 0) catch |err| {
+            return pyoz.raiseValueError(@errorName(err));
+        };
 
-        return anyValueToPyObject(r.?.value);
+        const result = self.db.lookup(maxminddb.any.Value, allocator, ip, .{}) catch |err| {
+            _module.getException(0).raise(@errorName(err));
+            return null;
+        };
+
+        const r = result orelse return _module.toPy(?bool, null);
+        defer r.deinit();
+
+        return anyValueToPyObject(r.value);
     }
 };
 
+/// Converts any.Value we used to decode an MMDB record to a Python Object.
 fn anyValueToPyObject(src: maxminddb.any.Value) ?*pyoz.PyObject {
     return switch (src) {
         .map => |entries| {
@@ -98,6 +122,9 @@ fn anyValueToPyObject(src: maxminddb.any.Value) ?*pyoz.PyObject {
 pub const _module = pyoz.module(.{
     .name = "maxmind",
     .from = &.{@This()},
+    .exceptions = &.{
+        pyoz.exception("ReaderException", .Exception),
+    },
 });
 
 // Required: forces analysis of all pub decls so PyInit_ is exported.
