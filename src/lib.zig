@@ -7,16 +7,18 @@ const allocator = std.heap.smp_allocator;
 
 /// Reads MaxMind DB files.
 pub const Reader = struct {
-    db: maxminddb.Reader,
+    _db: maxminddb.Reader,
     is_closed: bool,
 
     const Self = @This();
+    const all_ipv4 = "0.0.0.0/0";
+    const all_ipv6 = "::/0";
 
     /// Opens a MaxMind DB file, for example:
     /// r = maxmind.Reader('GeoLite2-City.mmdb')
     pub fn __new__(path: []const u8) !Reader {
         return .{
-            .db = try maxminddb.Reader.mmap(allocator, path, .{}),
+            ._db = try maxminddb.Reader.mmap(allocator, path, .{}),
             .is_closed = false,
         };
     }
@@ -45,7 +47,7 @@ pub const Reader = struct {
     pub fn close(self: *Self) void {
         if (!self.is_closed) {
             self.is_closed = true;
-            self.db.close();
+            self._db.close();
         }
     }
 
@@ -58,7 +60,7 @@ pub const Reader = struct {
             return pyoz.raiseValueError(@errorName(err));
         };
 
-        const result = self.db.lookup(maxminddb.any.Value, allocator, ip, .{}) catch |err| {
+        const result = self._db.lookup(maxminddb.any.Value, allocator, ip, .{}) catch |err| {
             _module.getException(0).raise(@errorName(err));
             return null;
         };
@@ -83,11 +85,63 @@ pub const Reader = struct {
             return null;
         };
 
-        return resultAsTuple(record_obj, network_obj) orelse {
-            pyoz.py.Py_DecRef(record_obj);
+        return resultAsTuple(record_obj, network_obj);
+    }
+
+    /// Scans networks within the given IP range (CIDR notation is also supported).
+    /// The iterator yields (record, network) tuples.
+    /// The ValueError exception indicates that a network is invalid.
+    /// The ReaderException is raised if a db read has failed.
+    pub fn scan(self: *Self, network: []const u8) ?pyoz.LazyIterator(?*pyoz.PyObject, Iterator) {
+        const net = maxminddb.Network.parse(network) catch |err| {
+            return pyoz.raiseValueError(@errorName(err));
+        };
+
+        return .{
+            .state = .{
+                .it = self._db.scan(maxminddb.any.Value, allocator, net, .{}) catch |err| {
+                    _module.getException(0).raise(@errorName(err));
+                    return null;
+                },
+            },
+        };
+    }
+
+    /// Scans the whole db.
+    pub fn __iter__(self: *Self) ?pyoz.LazyIterator(?*pyoz.PyObject, Iterator) {
+        const network = if (self._db.metadata.ip_version == 6) all_ipv6 else all_ipv4;
+        return self.scan(network);
+    }
+};
+
+const Iterator = struct {
+    it: maxminddb.Iterator(maxminddb.any.Value),
+
+    pub fn next(self: *Iterator) ?*pyoz.PyObject {
+        const item = self.it.next() catch |err| {
+            _module.getException(0).raise(@errorName(err));
+            return null;
+        };
+
+        // null signals StopIteration.
+        const r = item orelse return null;
+        defer r.deinit();
+
+        var net_buf: [64]u8 = undefined;
+        const net_str = std.fmt.bufPrint(&net_buf, "{f}", .{r.network}) catch |err| {
+            _module.getException(0).raise(@errorName(err));
+            return null;
+        };
+
+        const network_obj = _module.toPy([]const u8, net_str) orelse {
+            return null;
+        };
+        const record_obj = anyValueToPyObject(r.value) orelse {
             pyoz.py.Py_DecRef(network_obj);
             return null;
         };
+
+        return resultAsTuple(record_obj, network_obj);
     }
 };
 
