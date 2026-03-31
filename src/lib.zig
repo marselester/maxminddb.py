@@ -50,6 +50,9 @@ pub const Reader = struct {
     }
 
     /// Looks up a record by an IP address.
+    /// The returned value is a tuple (record, network) when it's found and (None, None) otherwise.
+    /// The ValueError exception indicates that an IP address is invalid.
+    /// The ReaderException is raised if a db read has failed.
     pub fn lookup(self: *Self, ip_address: []const u8) ?*pyoz.PyObject {
         const ip = std.net.Address.parseIp(ip_address, 0) catch |err| {
             return pyoz.raiseValueError(@errorName(err));
@@ -60,10 +63,31 @@ pub const Reader = struct {
             return null;
         };
 
-        const r = result orelse return _module.toPy(?bool, null);
+        const r = result orelse return resultAsTuple(
+            pyoz.py.Py_RETURN_NONE(),
+            pyoz.py.Py_RETURN_NONE(),
+        );
         defer r.deinit();
 
-        return anyValueToPyObject(r.value);
+        var net_buf: [64]u8 = undefined;
+        const net_str = std.fmt.bufPrint(&net_buf, "{f}", .{r.network}) catch |err| {
+            _module.getException(0).raise(@errorName(err));
+            return null;
+        };
+
+        const network_obj = _module.toPy([]const u8, net_str) orelse {
+            return null;
+        };
+        const record_obj = anyValueToPyObject(r.value) orelse {
+            pyoz.py.Py_DecRef(network_obj);
+            return null;
+        };
+
+        return resultAsTuple(record_obj, network_obj) orelse {
+            pyoz.py.Py_DecRef(record_obj);
+            pyoz.py.Py_DecRef(network_obj);
+            return null;
+        };
     }
 };
 
@@ -117,6 +141,19 @@ fn anyValueToPyObject(src: maxminddb.any.Value) ?*pyoz.PyObject {
         .float => |v| _module.toPy(f32, v),
         .boolean => |v| _module.toPy(bool, v),
     };
+}
+
+fn resultAsTuple(record: *pyoz.PyObject, network: *pyoz.PyObject) ?*pyoz.PyObject {
+    const tuple = pyoz.py.PyTuple_New(2) orelse {
+        pyoz.py.Py_DecRef(record);
+        pyoz.py.Py_DecRef(network);
+        return null;
+    };
+
+    _ = pyoz.py.PyTuple_SetItem(tuple, 0, record);
+    _ = pyoz.py.PyTuple_SetItem(tuple, 1, network);
+
+    return tuple;
 }
 
 pub const _module = pyoz.module(.{
