@@ -8,6 +8,7 @@ const allocator = std.heap.smp_allocator;
 /// Reads MaxMind DB files.
 pub const Reader = struct {
     _db: maxminddb.Reader,
+    _map_key_cache: MapKeyCache,
     is_closed: bool,
 
     const Self = @This();
@@ -19,6 +20,7 @@ pub const Reader = struct {
     pub fn __new__(path: []const u8) !Reader {
         return .{
             ._db = try maxminddb.Reader.mmap(allocator, path, .{}),
+            ._map_key_cache = .{},
             .is_closed = false,
         };
     }
@@ -47,6 +49,7 @@ pub const Reader = struct {
     pub fn close(self: *Self) void {
         if (!self.is_closed) {
             self.is_closed = true;
+            self._map_key_cache.deinit();
             self._db.close();
         }
     }
@@ -80,7 +83,7 @@ pub const Reader = struct {
         const network_obj = _module.toPy([]const u8, net_str) orelse {
             return null;
         };
-        const record_obj = anyValueToPyObject(r.value) orelse {
+        const record_obj = anyValueToPyObject(r.value, &self._map_key_cache) orelse {
             pyoz.py.Py_DecRef(network_obj);
             return null;
         };
@@ -103,6 +106,7 @@ pub const Reader = struct {
                     _module.getException(0).raise(@errorName(err));
                     return null;
                 },
+                .map_key_cache = &self._map_key_cache,
             },
         };
     }
@@ -116,6 +120,7 @@ pub const Reader = struct {
 
 const Iterator = struct {
     it: maxminddb.Iterator(maxminddb.any.Value),
+    map_key_cache: *MapKeyCache,
 
     pub fn next(self: *Iterator) ?*pyoz.PyObject {
         const item = self.it.next() catch |err| {
@@ -136,7 +141,7 @@ const Iterator = struct {
         const network_obj = _module.toPy([]const u8, net_str) orelse {
             return null;
         };
-        const record_obj = anyValueToPyObject(r.value) orelse {
+        const record_obj = anyValueToPyObject(r.value, self.map_key_cache) orelse {
             pyoz.py.Py_DecRef(network_obj);
             return null;
         };
@@ -145,19 +150,79 @@ const Iterator = struct {
     }
 };
 
+/// Caches MMDB record keys, i.e., Python string objects for "city", "country", "en", etc.
+const MapKeyCache = struct {
+    entries: [cache_size]Entry = [_]Entry{.{}} ** cache_size,
+
+    const cache_size = 256;
+    const Entry = struct {
+        key_addr: usize = 0,
+        obj: ?*pyoz.py.PyObject = null,
+    };
+
+    /// Returns a cached interned Python string for the given map key,
+    /// or creates, interns, and caches a new one.
+    fn intern(self: *MapKeyCache, key: []const u8) ?*pyoz.py.PyObject {
+        // MMDB keys point into mmap'd data where identical keys share the same address,
+        // so the pointer alone identifies the key.
+        // Mask the address to fit into 0..cache_size range.
+        // Masking is similar to "address % cache_size", but cache_size must be a power of 2.
+        const slot = @intFromPtr(key.ptr) & (cache_size - 1);
+        const e = &self.entries[slot];
+
+        // Cache hit.
+        if (e.obj != null and e.key_addr == @intFromPtr(key.ptr)) {
+            pyoz.py.Py_IncRef(e.obj.?);
+            return e.obj.?;
+        }
+
+        // Cache miss: create a new Python string and intern it.
+        // Interning deduplicates strings so dict key lookups use pointer
+        // comparison instead of string comparison.
+        // The obj must be a variable here because InternInPlace may replace
+        // the pointer with an already-interned string.
+        var obj = _module.toPy([]const u8, key) orelse return null;
+        pyoz.py.c.PyUnicode_InternInPlace(@ptrCast(&obj));
+
+        // Drop the cache's reference to the old object if this slot was occupied.
+        if (e.obj) |old| {
+            pyoz.py.Py_DecRef(old);
+        }
+
+        // Store the new object in the cache.
+        // IncRef because two owners now hold a reference: the cache and the caller.
+        pyoz.py.Py_IncRef(obj);
+        e.* = .{
+            .key_addr = @intFromPtr(key.ptr),
+            .obj = obj,
+        };
+
+        return obj;
+    }
+
+    fn deinit(self: *MapKeyCache) void {
+        for (&self.entries) |*e| {
+            if (e.obj) |obj| {
+                pyoz.py.Py_DecRef(obj);
+                e.obj = null;
+            }
+        }
+    }
+};
+
 /// Converts any.Value we used to decode an MMDB record to a Python Object.
-fn anyValueToPyObject(src: maxminddb.any.Value) ?*pyoz.PyObject {
+fn anyValueToPyObject(src: maxminddb.any.Value, cache: *MapKeyCache) ?*pyoz.PyObject {
     return switch (src) {
         .map => |entries| {
             const dict = pyoz.py.PyDict_New() orelse return null;
 
             for (entries) |entry| {
-                const key_obj = _module.toPy([]const u8, entry.key) orelse {
+                const key_obj = cache.intern(entry.key) orelse {
                     pyoz.py.Py_DecRef(dict);
                     return null;
                 };
 
-                const value_obj = anyValueToPyObject(entry.value) orelse {
+                const value_obj = anyValueToPyObject(entry.value, cache) orelse {
                     pyoz.py.Py_DecRef(key_obj);
                     pyoz.py.Py_DecRef(dict);
                     return null;
@@ -175,7 +240,7 @@ fn anyValueToPyObject(src: maxminddb.any.Value) ?*pyoz.PyObject {
             const list = pyoz.py.PyList_New(@intCast(items.len)) orelse return null;
 
             for (items, 0..) |item, i| {
-                const item_obj = anyValueToPyObject(item) orelse {
+                const item_obj = anyValueToPyObject(item, cache) orelse {
                     pyoz.py.Py_DecRef(list);
                     return null;
                 };
