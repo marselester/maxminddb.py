@@ -3,13 +3,15 @@ const std = @import("std");
 const pyoz = @import("PyOZ");
 const maxminddb = @import("maxminddb");
 
-const allocator = std.heap.smp_allocator;
+const Fields = maxminddb.Fields(32);
 
 /// Reads MaxMind DB files.
 pub const Reader = struct {
-    _db: maxminddb.Reader,
-    _map_key_cache: MapKeyCache,
     is_closed: bool,
+    _db: maxminddb.Reader,
+    _lookup_cache: maxminddb.Cache(maxminddb.any.Value),
+    _map_key_cache: MapKeyCache,
+    _allocator: std.mem.Allocator = std.heap.smp_allocator,
 
     const Self = @This();
     const all_ipv4 = "0.0.0.0/0";
@@ -18,8 +20,15 @@ pub const Reader = struct {
     /// Opens a MaxMind DB file, for example:
     /// r = maxmind.Reader('GeoLite2-City.mmdb')
     pub fn __new__(path: []const u8) !Reader {
+        const allocator = std.heap.smp_allocator;
+
         return .{
-            ._db = try maxminddb.Reader.mmap(allocator, path, .{}),
+            ._db = try maxminddb.Reader.mmap(
+                allocator,
+                path,
+                .{ .ipv4_index_first_n_bits = 16 },
+            ),
+            ._lookup_cache = try maxminddb.Cache(maxminddb.any.Value).init(allocator, .{}),
             ._map_key_cache = .{},
             .is_closed = false,
         };
@@ -50,6 +59,7 @@ pub const Reader = struct {
         if (!self.is_closed) {
             self.is_closed = true;
             self._map_key_cache.deinit();
+            self._lookup_cache.deinit();
             self._db.close();
         }
     }
@@ -58,15 +68,44 @@ pub const Reader = struct {
     /// The returned value is a tuple (record, network) when it's found and (None, None) otherwise.
     /// The ValueError exception indicates that an IP address is invalid.
     /// The ReaderException is raised if a db read has failed.
-    pub fn lookup(self: *Self, ip_address: []const u8) ?*pyoz.PyObject {
-        const ip = std.net.Address.parseIp(ip_address, 0) catch |err| {
+    pub fn lookup(
+        self: *Self,
+        args: pyoz.Args(struct {
+            ip_address: []const u8,
+            only: ?[]const u8 = null,
+        }),
+    ) ?*pyoz.PyObject {
+        const ip = std.net.Address.parseIp(args.value.ip_address, 0) catch |err| {
             return pyoz.raiseValueError(@errorName(err));
         };
 
-        const result = self._db.lookup(maxminddb.any.Value, allocator, ip, .{}) catch |err| {
-            _module.getException(0).raise(@errorName(err));
-            return null;
-        };
+        // Bypass the cache when only given fields need to be decoded from the db.
+        var result: ?maxminddb.Result(maxminddb.any.Value) = null;
+        if (args.value.only) |only| {
+            const f = Fields.parse(only, ',') catch |err| {
+                return pyoz.raiseValueError(@errorName(err));
+            };
+
+            result = self._db.lookup(
+                maxminddb.any.Value,
+                self._allocator,
+                ip,
+                .{ .only = f.only() },
+            ) catch |err| {
+                _module.getException(0).raise(@errorName(err));
+                return null;
+            };
+        } else {
+            result = self._db.lookupWithCache(
+                maxminddb.any.Value,
+                &self._lookup_cache,
+                ip,
+                .{},
+            ) catch |err| {
+                _module.getException(0).raise(@errorName(err));
+                return null;
+            };
+        }
 
         const r = result orelse return resultAsTuple(
             pyoz.py.Py_RETURN_NONE(),
@@ -74,55 +113,94 @@ pub const Reader = struct {
         );
         defer r.deinit();
 
-        var net_buf: [64]u8 = undefined;
-        const net_str = std.fmt.bufPrint(&net_buf, "{f}", .{r.network}) catch |err| {
-            _module.getException(0).raise(@errorName(err));
-            return null;
-        };
-
-        const network_obj = _module.toPy([]const u8, net_str) orelse {
-            return null;
-        };
-        const record_obj = anyValueToPyObject(r.value, &self._map_key_cache) orelse {
-            pyoz.py.Py_DecRef(network_obj);
-            return null;
-        };
-
-        return resultAsTuple(record_obj, network_obj);
+        return recordAsTuple(r, &self._map_key_cache);
     }
 
     /// Scans networks within the given IP range (CIDR notation is also supported).
     /// The iterator yields (record, network) tuples.
     /// The ValueError exception indicates that a network is invalid.
     /// The ReaderException is raised if a db read has failed.
-    pub fn scan(self: *Self, network: []const u8) ?pyoz.LazyIterator(?*pyoz.PyObject, Iterator) {
+    pub fn scan(
+        self: *Self,
+        args: pyoz.Args(struct {
+            network: []const u8,
+            only: ?[]const u8 = null,
+        }),
+    ) ?pyoz.LazyIterator(?*pyoz.PyObject, *IteratorState) {
+        return self._scan(args.value.network, args.value.only);
+    }
+
+    /// Scans the whole db.
+    pub fn __iter__(self: *Self) ?pyoz.LazyIterator(?*pyoz.PyObject, *IteratorState) {
+        const network = if (self._db.metadata.ip_version == 6) all_ipv6 else all_ipv4;
+        return self._scan(network, null);
+    }
+
+    fn _scan(
+        self: *Self,
+        network: []const u8,
+        only: ?[]const u8,
+    ) ?pyoz.LazyIterator(?*pyoz.PyObject, *IteratorState) {
         const net = maxminddb.Network.parse(network) catch |err| {
             return pyoz.raiseValueError(@errorName(err));
         };
 
-        return .{
-            .state = .{
-                .it = self._db.scan(maxminddb.any.Value, allocator, net, .{}) catch |err| {
-                    _module.getException(0).raise(@errorName(err));
-                    return null;
-                },
-                .map_key_cache = &self._map_key_cache,
-            },
-        };
-    }
+        const allocator = self._allocator;
 
-    /// Scans the whole db.
-    pub fn __iter__(self: *Self) ?pyoz.LazyIterator(?*pyoz.PyObject, Iterator) {
-        const network = if (self._db.metadata.ip_version == 6) all_ipv6 else all_ipv4;
-        return self.scan(network);
+        // Heap-allocate the iterator so all internal pointers remain stable.
+        // PyOZ copies only the pointer, not the struct.
+        const state = allocator.create(IteratorState) catch |err| {
+            _module.getException(0).raise(@errorName(err));
+            return null;
+        };
+
+        state.allocator = allocator;
+        state.map_key_cache = &self._map_key_cache;
+
+        state.fields = if (only) |fields_str|
+            Fields.parseAlloc(allocator, fields_str, ',') catch |err| {
+                allocator.destroy(state);
+                return pyoz.raiseValueError(@errorName(err));
+            }
+        else
+            .{};
+
+        state.cache = maxminddb.Cache(maxminddb.any.Value).init(allocator, .{}) catch |err| {
+            state.fields.deinit(allocator);
+            allocator.destroy(state);
+
+            _module.getException(0).raise(@errorName(err));
+            return null;
+        };
+
+        state.it = self._db.scanWithCache(
+            maxminddb.any.Value,
+            &state.cache,
+            net,
+            .{ .only = state.fields.only() },
+        ) catch |err| {
+            state.cache.deinit();
+            state.fields.deinit(allocator);
+            allocator.destroy(state);
+
+            _module.getException(0).raise(@errorName(err));
+            return null;
+        };
+
+        return .{
+            .state = state,
+        };
     }
 };
 
-const Iterator = struct {
+const IteratorState = struct {
     it: maxminddb.Iterator(maxminddb.any.Value),
+    fields: Fields,
+    cache: maxminddb.Cache(maxminddb.any.Value),
     map_key_cache: *MapKeyCache,
+    allocator: std.mem.Allocator,
 
-    pub fn next(self: *Iterator) ?*pyoz.PyObject {
+    pub fn next(self: *IteratorState) ?*pyoz.PyObject {
         const item = self.it.next() catch |err| {
             _module.getException(0).raise(@errorName(err));
             return null;
@@ -130,23 +208,14 @@ const Iterator = struct {
 
         // null signals StopIteration.
         const r = item orelse return null;
-        defer r.deinit();
 
-        var net_buf: [64]u8 = undefined;
-        const net_str = std.fmt.bufPrint(&net_buf, "{f}", .{r.network}) catch |err| {
-            _module.getException(0).raise(@errorName(err));
-            return null;
-        };
+        return recordAsTuple(r, self.map_key_cache);
+    }
 
-        const network_obj = _module.toPy([]const u8, net_str) orelse {
-            return null;
-        };
-        const record_obj = anyValueToPyObject(r.value, self.map_key_cache) orelse {
-            pyoz.py.Py_DecRef(network_obj);
-            return null;
-        };
-
-        return resultAsTuple(record_obj, network_obj);
+    pub fn deinit(self: *IteratorState) void {
+        self.cache.deinit();
+        self.fields.deinit(self.allocator);
+        self.allocator.destroy(self);
     }
 };
 
@@ -209,6 +278,27 @@ const MapKeyCache = struct {
         }
     }
 };
+
+fn recordAsTuple(
+    r: maxminddb.Result(maxminddb.any.Value),
+    cache: *MapKeyCache,
+) ?*pyoz.PyObject {
+    var net_buf: [64]u8 = undefined;
+    const net_str = std.fmt.bufPrint(&net_buf, "{f}", .{r.network}) catch |err| {
+        _module.getException(0).raise(@errorName(err));
+        return null;
+    };
+
+    const network_obj = _module.toPy([]const u8, net_str) orelse {
+        return null;
+    };
+    const record_obj = anyValueToPyObject(r.value, cache) orelse {
+        pyoz.py.Py_DecRef(network_obj);
+        return null;
+    };
+
+    return resultAsTuple(record_obj, network_obj);
+}
 
 /// Converts any.Value we used to decode an MMDB record to a Python Object.
 fn anyValueToPyObject(src: maxminddb.any.Value, cache: *MapKeyCache) ?*pyoz.PyObject {
