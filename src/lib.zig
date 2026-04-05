@@ -64,6 +64,23 @@ pub const Reader = struct {
         }
     }
 
+    /// Returns db metadata.
+    pub fn metadata(self: *Self) ?*pyoz.PyObject {
+        var arena = std.heap.ArenaAllocator.init(self._allocator);
+        defer arena.deinit();
+
+        const meta = maxminddb.Reader.decodeMetadata(
+            maxminddb.any.Value,
+            arena.allocator(),
+            self._db.src,
+        ) catch |err| {
+            _module.getException(0).raise(@errorName(err));
+            return null;
+        };
+
+        return anyValueToPyObject(meta, &self._map_key_cache);
+    }
+
     /// Looks up a record by an IP address.
     /// The returned value is a tuple (record, network) when it's found and (None, None) otherwise.
     /// The ValueError exception indicates that an IP address is invalid.
@@ -72,7 +89,7 @@ pub const Reader = struct {
         self: *Self,
         args: pyoz.Args(struct {
             ip_address: []const u8,
-            only: ?[]const u8 = null,
+            fields: ?[]const u8 = null,
         }),
     ) ?*pyoz.PyObject {
         const ip = std.net.Address.parseIp(args.value.ip_address, 0) catch |err| {
@@ -81,7 +98,7 @@ pub const Reader = struct {
 
         // Bypass the cache when only given fields need to be decoded from the db.
         var result: ?maxminddb.Result(maxminddb.any.Value) = null;
-        if (args.value.only) |only| {
+        if (args.value.fields) |only| {
             const f = Fields.parse(only, ',') catch |err| {
                 return pyoz.raiseValueError(@errorName(err));
             };
@@ -124,10 +141,10 @@ pub const Reader = struct {
         self: *Self,
         args: pyoz.Args(struct {
             network: []const u8,
-            only: ?[]const u8 = null,
+            fields: ?[]const u8 = null,
         }),
     ) ?pyoz.LazyIterator(?*pyoz.PyObject, *IteratorState) {
-        return self._scan(args.value.network, args.value.only);
+        return self._scan(args.value.network, args.value.fields);
     }
 
     /// Scans the whole db.
@@ -139,7 +156,7 @@ pub const Reader = struct {
     fn _scan(
         self: *Self,
         network: []const u8,
-        only: ?[]const u8,
+        fields: ?[]const u8,
     ) ?pyoz.LazyIterator(?*pyoz.PyObject, *IteratorState) {
         const net = maxminddb.Network.parse(network) catch |err| {
             return pyoz.raiseValueError(@errorName(err));
@@ -157,7 +174,7 @@ pub const Reader = struct {
         state.allocator = allocator;
         state.map_key_cache = &self._map_key_cache;
 
-        state.fields = if (only) |fields_str|
+        state.fields = if (fields) |fields_str|
             Fields.parseAlloc(allocator, fields_str, ',') catch |err| {
                 allocator.destroy(state);
                 return pyoz.raiseValueError(@errorName(err));

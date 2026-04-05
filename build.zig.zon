@@ -9,8 +9,8 @@
             .hash = "PyOZ-0.12.2-ntlpPvwlGACtYR_dRrkLN483QaCCjIkqSRJdRkruEmky",
         },
         .maxminddb = .{
-            .url = "git+https://github.com/marselester/maxminddb.zig?ref=master#a1f39f681a1be68aa367491c558a37dd6c8c5a27",
-            .hash = "maxminddb-0.6.0-HBInuljlAQDwX4-pteUuGG6T8g1xmscn1ITn1VThKDTD",
+            .url = "git+https://github.com/marselester/maxminddb.zig?ref=master#af0d49ca1e95443054899a322dff9b90630d0e81",
+            .hash = "maxminddb-0.6.0-HBInumLrAQDmbXzrZfzf0LbL_9wYo1Op04n_3YCBemI0",
         },
     },
     .paths = .{
