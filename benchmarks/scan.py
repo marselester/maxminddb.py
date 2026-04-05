@@ -11,10 +11,9 @@ parser.add_argument("--file", default="GeoLite2-City.mmdb", help="path to mmdb f
 args = parser.parse_args()
 
 db = maxmind.Reader(args.file)
-all_ip = "::/0" if db.metadata()["ip_version"] == 6 else "0.0.0.0/0"
 
 start = timeit.default_timer()
-n = sum(1 for _ in db.scan(all_ip, args.fields))
+n = sum(1 for _ in db.scan(fields=args.fields))
 elapsed = timeit.default_timer() - start
 
 print(f"{n:,} records in {elapsed:.1f}s ({int(n / elapsed):,} records per second)")

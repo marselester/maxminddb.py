@@ -150,23 +150,27 @@ pub const Reader = struct {
     }
 
     /// Scans networks within the given IP range (CIDR notation is also supported).
+    /// When no network is given, scans the whole db.
     /// The iterator yields (record, network) tuples.
     /// The ValueError exception indicates that a network is invalid.
     /// The ReaderException is raised if a db read has failed.
     pub fn scan(
         self: *Self,
         args: pyoz.Args(struct {
-            network: []const u8,
+            network: ?[]const u8 = null,
             fields: ?[]const u8 = null,
         }),
     ) ?pyoz.LazyIterator(?*pyoz.PyObject, *IteratorState) {
-        return self._scan(args.value.network, args.value.fields);
+        const network = args.value.network orelse
+            if (self._db.metadata.ip_version == 6) all_ipv6 else all_ipv4;
+        return self._scan(network, args.value.fields);
     }
 
     /// Scans the whole db.
     pub fn __iter__(self: *Self) ?pyoz.LazyIterator(?*pyoz.PyObject, *IteratorState) {
-        const network = if (self._db.metadata.ip_version == 6) all_ipv6 else all_ipv4;
-        return self._scan(network, null);
+        return self.scan(.{
+            .value = .{},
+        });
     }
 
     fn _scan(

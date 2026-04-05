@@ -50,7 +50,7 @@ You should decode only the fields you need to improve performance.
 ```python
 db.lookup("89.160.20.128", "city,continent")
 
-db.scan("89.160.20.0/24", "city,country")
+db.scan(fields="city,country")
 ```
 
 You can access the database metadata.

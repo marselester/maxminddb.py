@@ -100,6 +100,7 @@ def test_scan_invalid_network(db):
 def test_scan_whole_db(db):
     count = sum(1 for _ in db)
     assert count == 242
+    assert count == sum(1 for _ in db.scan())
 
 
 def test_metadata(db):
