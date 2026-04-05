@@ -18,8 +18,8 @@ def test_open_db_not_found():
 
 
 def test_open_db_corrupted():
-    with pytest.raises(Exception):
-        maxmind.Reader("/dev/null")
+    with pytest.raises(maxmind.ReaderException, match="CorruptedTree"):
+        maxmind.Reader("test-data/test-data/GeoIP2-City-Test-Invalid-Node-Count.mmdb")
 
 
 def test_open_db_context_manager():

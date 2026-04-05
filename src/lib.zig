@@ -23,15 +23,31 @@ pub const Reader = struct {
         const allocator = std.heap.smp_allocator;
 
         return .{
-            ._db = try maxminddb.Reader.mmap(
+            ._db = maxminddb.Reader.mmap(
                 allocator,
                 path,
                 .{ .ipv4_index_first_n_bits = 16 },
-            ),
+            ) catch |err| {
+                // Raise ReaderException for db format errors.
+                // OS errors (FileNotFound, AccessDenied, etc.) are left for PyOZ
+                // to map to Python's built-in exceptions.
+                if (isMMDbError(err)) {
+                    _module.getException(0).raise(@errorName(err));
+                }
+
+                return err;
+            },
             ._lookup_cache = try maxminddb.Cache(maxminddb.any.Value).init(allocator, .{}),
             ._map_key_cache = .{},
             .is_closed = false,
         };
+    }
+
+    fn isMMDbError(err: anyerror) bool {
+        inline for (@typeInfo(maxminddb.Error).error_set.?) |e| {
+            if (err == @field(anyerror, e.name)) return true;
+        }
+        return false;
     }
 
     /// Closes a db when the Reader is deleted, for example:
