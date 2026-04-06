@@ -22,12 +22,17 @@ pub const Reader = struct {
     pub fn __new__(path: []const u8) !Reader {
         const allocator = std.heap.smp_allocator;
 
+        // Release GIL during mmap and index building.
+        const gil = pyoz.releaseGIL();
+        const db = maxminddb.Reader.mmap(
+            allocator,
+            path,
+            .{ .ipv4_index_first_n_bits = 16 },
+        );
+        gil.acquire();
+
         return .{
-            ._db = maxminddb.Reader.mmap(
-                allocator,
-                path,
-                .{ .ipv4_index_first_n_bits = 16 },
-            ) catch |err| {
+            ._db = db catch |err| {
                 // Raise ReaderException for db format errors.
                 // OS errors (FileNotFound, AccessDenied, etc.) are left for PyOZ
                 // to map to Python's built-in exceptions.
