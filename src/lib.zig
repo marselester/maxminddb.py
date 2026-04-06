@@ -24,24 +24,27 @@ pub const Reader = struct {
 
         // Release GIL during mmap and index building.
         const gil = pyoz.releaseGIL();
-        const db = maxminddb.Reader.mmap(
+        const db_or_err = maxminddb.Reader.mmap(
             allocator,
             path,
             .{ .ipv4_index_first_n_bits = 16 },
         );
         gil.acquire();
 
-        return .{
-            ._db = db catch |err| {
-                // Raise ReaderException for db format errors.
-                // OS errors (FileNotFound, AccessDenied, etc.) are left for PyOZ
-                // to map to Python's built-in exceptions.
-                if (isMMDbError(err)) {
-                    _module.getException(0).raise(@errorName(err));
-                }
+        var db = db_or_err catch |err| {
+            // Raise ReaderException for db format errors.
+            // OS errors (FileNotFound, AccessDenied, etc.) are left for PyOZ
+            // to map to Python's built-in exceptions.
+            if (isMMDbError(err)) {
+                _module.getException(0).raise(@errorName(err));
+            }
 
-                return err;
-            },
+            return err;
+        };
+        errdefer db.close();
+
+        return .{
+            ._db = db,
             ._lookup_cache = try maxminddb.Cache(maxminddb.any.Value).init(allocator, .{}),
             ._map_key_cache = .{},
             .is_closed = false,
