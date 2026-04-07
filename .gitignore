@@ -2,6 +2,6 @@
 zig-out
 
 /dist
-/venv
+/.venv
 __pycache__
 .python-version

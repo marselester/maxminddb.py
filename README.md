@@ -74,14 +74,11 @@ $ cd ./maxminddb.py/
 $ git submodule update --init --recursive
 ```
 
-Install the dependencies.
+Build the extension using PyOz.
 
 ```sh
-$ pyenv install 3.13.12
-$ pyenv local 3.13.12
-$ pip install virtualenv
-$ virtualenv venv
-$ . venv/bin/activate
+$ python -m venv .venv
+$ source .venv/bin/activate
 $ pip install pyoz
 $ pyoz develop
 ```
