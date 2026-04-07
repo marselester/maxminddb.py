@@ -5,12 +5,12 @@
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .PyOZ = .{
-            .url = "git+https://github.com/marselester/PyOZ#9063620b2b931367f7f9f728b1e663ce6380e0ee",
-            .hash = "PyOZ-0.12.2-ntlpPvwlGACtYR_dRrkLN483QaCCjIkqSRJdRkruEmky",
+            .url = "git+https://github.com/marselester/PyOZ#27f30494412fca75efd4e54ff22f87e3b53d5eae",
+            .hash = "PyOZ-0.12.2-ntlpPqQnGACswiui0uF0ahU0AhP139NFZfJZGEQ4H_Mw",
         },
         .maxminddb = .{
-            .url = "git+https://github.com/marselester/maxminddb.zig?ref=master#af0d49ca1e95443054899a322dff9b90630d0e81",
-            .hash = "maxminddb-0.6.0-HBInumLrAQDmbXzrZfzf0LbL_9wYo1Op04n_3YCBemI0",
+            .url = "git+https://github.com/marselester/maxminddb.zig?ref=master#a560f532a21a8078134127ad3569a24809f7150c",
+            .hash = "maxminddb-0.7.0-HBInuo0FAgCPL5mrTwCQDoLrWb_eVRYvbj9oTaow1exC",
         },
     },
     .paths = .{
