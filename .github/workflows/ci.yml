@@ -1,0 +1,51 @@
+name: CI
+
+on: [push]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - run: pip install ruff
+      - run: ruff check
+      - run: ruff format --check
+
+  test:
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-latest
+          - macos-15-intel
+          - windows-latest
+          - windows-11-arm
+        python-version: ["3.14"]
+        include:
+          - os: ubuntu-latest
+            python-version: "3.10"
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      # Strawberry Perl ships Python 3.9 that poisons the build.
+      - name: Remove Strawberry Perl
+        if: runner.os == 'Windows'
+        run: Remove-Item C:\Strawberry -Recurse -Force -ErrorAction SilentlyContinue
+      - name: Fetch test data
+        run: git submodule update --init
+      - name: Install dependencies
+        run: pip install pytest pyoz==0.12.2
+      - name: Build
+        run: pyoz develop
+      - name: Run tests
+        run: pytest -vs
