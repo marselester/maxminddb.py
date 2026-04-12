@@ -1,3 +1,5 @@
+import types
+
 import maxmind
 import pytest
 
@@ -62,11 +64,11 @@ def test_lookup_only_fields(db):
 
 def test_lookup_nested_types(db):
     r, _ = db.lookup("89.160.20.128")
-    assert isinstance(r["city"], dict)
-    assert isinstance(r["city"]["names"], dict)
+    assert isinstance(r["city"], types.MappingProxyType)
+    assert isinstance(r["city"]["names"], types.MappingProxyType)
     assert isinstance(r["location"]["latitude"], float)
     assert isinstance(r["location"]["longitude"], float)
-    assert isinstance(r["subdivisions"], list)
+    assert isinstance(r["subdivisions"], tuple)
     assert len(r["subdivisions"]) > 0
 
 
@@ -107,4 +109,117 @@ def test_metadata(db):
     meta = db.metadata()
     assert meta["database_type"] == "GeoLite2-City"
     assert meta["ip_version"] == 6
+    assert meta["binary_format_major_version"] == 2
+    assert meta["binary_format_minor_version"] == 0
+    assert meta["record_size"] == 28
+    assert meta["node_count"] > 0
+    assert meta["build_epoch"] > 0
     assert "en" in meta["languages"]
+
+
+def test_only_lookup(db):
+    q = db.only("city,continent")
+    r, net = q.lookup("89.160.20.128")
+    assert r["city"]["names"]["en"] == "Linköping"
+    assert "country" not in r
+    assert net == "89.160.20.128/25"
+
+
+def test_only_lookup_not_found(db):
+    q = db.only("city")
+    r, net = q.lookup("0.0.0.0")
+    assert (r, net) == (None, None)
+
+
+def test_only_lookup_cached(db):
+    q = db.only("city")
+    r1, _ = q.lookup("89.160.20.128")
+    r2, _ = q.lookup("89.160.20.128")
+    assert r1["city"]["names"]["en"] == r2["city"]["names"]["en"]
+
+
+def test_only_scan(db):
+    q = db.only("city,continent")
+    records = list(q.scan("89.160.20.0/24"))
+    assert len(records) == 2
+    for r, net in records:
+        assert r["city"]["names"]["en"] == "Linköping"
+        assert "country" not in r
+
+
+def test_only_scan_whole_db(db):
+    q = db.only("city")
+    count = sum(1 for _ in q.scan())
+    assert count == 242
+
+
+def test_only_one_liner_scan(db):
+    count = sum(1 for _ in db.only("city").scan())
+    assert count == 242
+
+
+def test_only_empty_fields(db):
+    q = db.only("")
+    r, _ = q.lookup("89.160.20.128")
+    assert "city" in r
+    assert "country" in r
+    assert "location" in r
+
+
+def test_lookup_after_close():
+    db = maxmind.Reader(TEST_DB)
+    db.close()
+    with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
+        db.lookup("89.160.20.128")
+
+
+def test_scan_after_close():
+    db = maxmind.Reader(TEST_DB)
+    db.close()
+    with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
+        db.scan()
+
+
+def test_metadata_after_close():
+    db = maxmind.Reader(TEST_DB)
+    db.close()
+    with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
+        db.metadata()
+
+
+def test_iter_after_close():
+    db = maxmind.Reader(TEST_DB)
+    db.close()
+    with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
+        iter(db)
+
+
+def test_only_after_close():
+    db = maxmind.Reader(TEST_DB)
+    db.close()
+    with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
+        db.only("city")
+
+
+def test_only_lookup_after_close():
+    db = maxmind.Reader(TEST_DB)
+    q = db.only("city")
+    db.close()
+    with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
+        q.lookup("89.160.20.128")
+
+
+def test_only_scan_after_close():
+    db = maxmind.Reader(TEST_DB)
+    q = db.only("city")
+    db.close()
+    with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
+        list(q.scan())
+
+
+def test_iterator_after_close():
+    db = maxmind.Reader(TEST_DB)
+    it = iter(db.scan())
+    db.close()
+    with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
+        next(it)

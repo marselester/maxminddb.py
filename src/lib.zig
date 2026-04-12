@@ -3,6 +3,7 @@ const std = @import("std");
 const pyoz = @import("PyOZ");
 const maxminddb = @import("maxminddb");
 
+const allocator = std.heap.smp_allocator;
 const Fields = maxminddb.Fields(32);
 
 /// Reads MaxMind DB files.
@@ -11,7 +12,7 @@ pub const Reader = struct {
     _db: maxminddb.Reader,
     _lookup_cache: maxminddb.Cache(maxminddb.any.Value),
     _map_key_cache: MapKeyCache,
-    _allocator: std.mem.Allocator = std.heap.smp_allocator,
+    _py_cache: PyDictCache = .{},
 
     const Self = @This();
     const all_ipv4 = "0.0.0.0/0";
@@ -20,8 +21,6 @@ pub const Reader = struct {
     /// Opens a MaxMind DB file, for example:
     /// r = maxmind.Reader('GeoLite2-City.mmdb')
     pub fn __new__(path: []const u8) !Reader {
-        const allocator = std.heap.smp_allocator;
-
         // Release GIL during mmap and index building.
         const gil = pyoz.releaseGIL();
         const db_or_err = maxminddb.Reader.mmap(
@@ -55,6 +54,7 @@ pub const Reader = struct {
         inline for (@typeInfo(maxminddb.Error).error_set.?) |e| {
             if (err == @field(anyerror, e.name)) return true;
         }
+
         return false;
     }
 
@@ -82,6 +82,7 @@ pub const Reader = struct {
     pub fn close(self: *Self) void {
         if (!self.is_closed) {
             self.is_closed = true;
+            self._py_cache.deinit();
             self._map_key_cache.deinit();
             self._lookup_cache.deinit();
             self._db.close();
@@ -90,10 +91,15 @@ pub const Reader = struct {
 
     /// Returns db metadata.
     pub fn metadata(self: *Self) ?*pyoz.PyObject {
-        var arena = std.heap.ArenaAllocator.init(self._allocator);
+        if (self.is_closed) {
+            _module.getException(0).raise("ReaderClosed");
+            return null;
+        }
+
+        var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
 
-        const meta = maxminddb.Reader.decodeMetadata(
+        const meta = maxminddb.Metadata.decodeAs(
             maxminddb.any.Value,
             arena.allocator(),
             self._db.src,
@@ -102,7 +108,7 @@ pub const Reader = struct {
             return null;
         };
 
-        return anyValueToPyObject(meta, &self._map_key_cache);
+        return frozenValueToPyObject(meta, &self._map_key_cache);
     }
 
     /// Looks up a record by an IP address.
@@ -116,45 +122,56 @@ pub const Reader = struct {
             fields: ?[]const u8 = null,
         }),
     ) ?*pyoz.PyObject {
+        if (self.is_closed) {
+            _module.getException(0).raise("ReaderClosed");
+            return null;
+        }
+
         const ip = std.net.Address.parseIp(args.value.ip_address, 0) catch |err| {
             return pyoz.raiseValueError(@errorName(err));
         };
 
-        // Bypass the cache when only given fields need to be decoded from the db.
-        var result: ?maxminddb.Result(maxminddb.any.Value) = null;
-        if (args.value.fields) |only| {
-            const f = Fields.parse(only, ',') catch |err| {
+        if (args.value.fields) |fields_str| {
+            // Decode only requested fields, no caching.
+            const f = Fields.parse(fields_str, ',') catch |err| {
                 return pyoz.raiseValueError(@errorName(err));
             };
 
-            result = self._db.lookup(
+            const result = self._db.lookup(
                 maxminddb.any.Value,
-                self._allocator,
+                allocator,
                 ip,
                 .{ .only = f.only() },
             ) catch |err| {
                 _module.getException(0).raise(@errorName(err));
                 return null;
             };
-        } else {
-            result = self._db.lookupWithCache(
-                maxminddb.any.Value,
-                &self._lookup_cache,
-                ip,
-                .{},
-            ) catch |err| {
-                _module.getException(0).raise(@errorName(err));
+
+            const r = result orelse return resultAsTuple(
+                pyoz.py.Py_RETURN_NONE(),
+                pyoz.py.Py_RETURN_NONE(),
+            );
+            defer r.deinit();
+
+            const record_obj = frozenValueToPyObject(r.value, &self._map_key_cache) orelse {
                 return null;
             };
+            const network_obj = formatNetwork(r.network) orelse {
+                pyoz.py.Py_DecRef(record_obj);
+                return null;
+            };
+
+            return resultAsTuple(record_obj, network_obj);
         }
 
-        const r = result orelse return resultAsTuple(
-            pyoz.py.Py_RETURN_NONE(),
-            pyoz.py.Py_RETURN_NONE(),
+        return cachedLookup(
+            &self._db,
+            ip,
+            .{},
+            &self._py_cache,
+            &self._lookup_cache,
+            &self._map_key_cache,
         );
-        defer r.deinit();
-
-        return recordAsTuple(r, &self._map_key_cache);
     }
 
     /// Scans networks within the given IP range (CIDR notation is also supported).
@@ -169,100 +186,262 @@ pub const Reader = struct {
             fields: ?[]const u8 = null,
         }),
     ) ?pyoz.LazyIterator(?*pyoz.PyObject, *IteratorState) {
+        if (self.is_closed) {
+            _module.getException(0).raise("ReaderClosed");
+            return null;
+        }
+
         const network = args.value.network orelse
             if (self._db.metadata.ip_version == 6) all_ipv6 else all_ipv4;
-        return self._scan(network, args.value.fields);
+
+        return createScanIterator(
+            self,
+            network,
+            args.value.fields,
+            &self._map_key_cache,
+        );
     }
 
     /// Scans the whole db.
     pub fn __iter__(self: *Self) ?pyoz.LazyIterator(?*pyoz.PyObject, *IteratorState) {
-        return self.scan(.{
-            .value = .{},
-        });
+        return self.scan(.{ .value = .{} });
     }
 
-    fn _scan(
-        self: *Self,
-        network: []const u8,
-        fields: ?[]const u8,
-    ) ?pyoz.LazyIterator(?*pyoz.PyObject, *IteratorState) {
-        const net = maxminddb.Network.parse(network) catch |err| {
+    /// Returns a cached, field-filtered view of the database.
+    /// Best for repeated lookups/scans with the same fields, e.g., used in web services.
+    ///
+    /// q = db.only("city,country")
+    /// r, net = q.lookup(ip)
+    ///
+    /// for r, net in q.scan():
+    ///     print(r, net)
+    ///
+    /// For free-threaded Python, use per-thread `only()` instances.
+    pub fn only(self: *Self, fields_str: []const u8) !Only {
+        if (self.is_closed) {
+            _module.getException(0).raise("ReaderClosed");
+            return error.ReaderClosed;
+        }
+
+        var parsed_fields = try Fields.parseAlloc(allocator, fields_str, ',');
+        errdefer parsed_fields.deinit(allocator);
+
+        return .{
+            .reader = self,
+            .fields = parsed_fields,
+            .cache = try maxminddb.Cache(maxminddb.any.Value).init(allocator, .{}),
+        };
+    }
+};
+
+/// A cached, field-filtered view of a Reader created by Reader.only("city,country").
+/// Fields are parsed once and the view has its own caches,
+/// so repeated lookups/scans benefit from both maxminddb.Cache and Python object caching.
+pub const Only = struct {
+    reader: *Reader,
+    fields: Fields,
+    cache: maxminddb.Cache(maxminddb.any.Value),
+    map_key_cache: MapKeyCache = .{},
+    py_cache: PyDictCache = .{},
+
+    /// Looks up a record by an IP address using cached field-filtered decoding.
+    pub fn lookup(self: *Only, ip_address: []const u8) ?*pyoz.PyObject {
+        if (self.reader.is_closed) {
+            _module.getException(0).raise("ReaderClosed");
+            return null;
+        }
+
+        const ip = std.net.Address.parseIp(ip_address, 0) catch |err| {
             return pyoz.raiseValueError(@errorName(err));
         };
 
-        const allocator = self._allocator;
+        return cachedLookup(
+            &self.reader._db,
+            ip,
+            .{ .only = self.fields.only() },
+            &self.py_cache,
+            &self.cache,
+            &self.map_key_cache,
+        );
+    }
 
-        // Heap-allocate the iterator so all internal pointers remain stable.
-        // PyOZ copies only the pointer, not the struct.
-        const state = allocator.create(IteratorState) catch |err| {
-            _module.getException(0).raise(@errorName(err));
+    /// Scans networks using cached field-filtered decoding.
+    pub fn scan(
+        self: *Only,
+        args: pyoz.Args(struct {
+            network: ?[]const u8 = null,
+        }),
+    ) ?pyoz.LazyIterator(?*pyoz.PyObject, *IteratorState) {
+        if (self.reader.is_closed) {
+            _module.getException(0).raise("ReaderClosed");
             return null;
-        };
+        }
 
-        state.allocator = allocator;
-        state.map_key_cache = &self._map_key_cache;
+        const network = args.value.network orelse
+            if (self.reader._db.metadata.ip_version == 6) Reader.all_ipv6 else Reader.all_ipv4;
 
-        state.fields = if (fields) |fields_str|
-            Fields.parseAlloc(allocator, fields_str, ',') catch |err| {
-                allocator.destroy(state);
-                return pyoz.raiseValueError(@errorName(err));
-            }
-        else
-            .{};
+        return createScanIterator(
+            self.reader,
+            network,
+            self.fields.buf,
+            &self.map_key_cache,
+        );
+    }
 
-        state.cache = maxminddb.Cache(maxminddb.any.Value).init(allocator, .{}) catch |err| {
-            state.fields.deinit(allocator);
-            allocator.destroy(state);
-
-            _module.getException(0).raise(@errorName(err));
-            return null;
-        };
-
-        state.it = self._db.scanWithCache(
-            maxminddb.any.Value,
-            &state.cache,
-            net,
-            .{ .only = state.fields.only() },
-        ) catch |err| {
-            state.cache.deinit();
-            state.fields.deinit(allocator);
-            allocator.destroy(state);
-
-            _module.getException(0).raise(@errorName(err));
-            return null;
-        };
-
-        return .{
-            .state = state,
-        };
+    pub fn __del__(self: *Only) void {
+        self.py_cache.deinit();
+        self.map_key_cache.deinit();
+        self.cache.deinit();
+        self.fields.deinit(allocator);
     }
 };
 
 const IteratorState = struct {
-    it: maxminddb.Iterator(maxminddb.any.Value),
+    reader: *Reader,
+    it: maxminddb.EntryIterator,
     fields: Fields,
     cache: maxminddb.Cache(maxminddb.any.Value),
     map_key_cache: *MapKeyCache,
-    allocator: std.mem.Allocator,
+    py_cache: PyDictCache = .{},
 
     pub fn next(self: *IteratorState) ?*pyoz.PyObject {
-        const item = self.it.next() catch |err| {
+        if (self.reader.is_closed) {
+            _module.getException(0).raise("ReaderClosed");
+            return null;
+        }
+
+        const entry = self.it.next() catch |err| {
             _module.getException(0).raise(@errorName(err));
+            return null;
+        } orelse {
+            return null; // null signals StopIteration.
+        };
+
+        const network_obj = formatNetwork(entry.network) orelse {
             return null;
         };
 
-        // null signals StopIteration.
-        const r = item orelse return null;
+        // Python dict cache hit.
+        if (self.py_cache.get(entry.pointer)) |cached_record| {
+            pyoz.py.Py_IncRef(cached_record);
 
-        return recordAsTuple(r, self.map_key_cache);
+            return resultAsTuple(cached_record, network_obj);
+        }
+
+        // Decode via maxminddb.Cache, build frozen Python objects, and cache them.
+        const value = self.cache.decode(
+            &self.reader._db,
+            entry,
+            .{ .only = self.fields.only() },
+        ) catch |err| {
+            pyoz.py.Py_DecRef(network_obj);
+            _module.getException(0).raise(@errorName(err));
+
+            return null;
+        };
+
+        const record_obj = frozenValueToPyObject(value, self.map_key_cache) orelse {
+            pyoz.py.Py_DecRef(network_obj);
+            return null;
+        };
+        self.py_cache.put(entry.pointer, record_obj);
+
+        return resultAsTuple(record_obj, network_obj);
     }
 
     pub fn deinit(self: *IteratorState) void {
+        self.py_cache.deinit();
         self.cache.deinit();
-        self.fields.deinit(self.allocator);
-        self.allocator.destroy(self);
+        self.fields.deinit(allocator);
+        allocator.destroy(self);
     }
 };
+
+fn cachedLookup(
+    db: *maxminddb.Reader,
+    ip: std.net.Address,
+    decode_options: maxminddb.Reader.DecodeOptions,
+    py_cache: *PyDictCache,
+    cache: *maxminddb.Cache(maxminddb.any.Value),
+    map_key_cache: *MapKeyCache,
+) ?*pyoz.PyObject {
+    const found = db.find(ip, .{}) catch |err| {
+        _module.getException(0).raise(@errorName(err));
+        return null;
+    } orelse return resultAsTuple(
+        pyoz.py.Py_RETURN_NONE(),
+        pyoz.py.Py_RETURN_NONE(),
+    );
+
+    const network_obj = formatNetwork(found.network) orelse {
+        return null;
+    };
+
+    if (py_cache.get(found.pointer)) |cached_record| {
+        pyoz.py.Py_IncRef(cached_record);
+        return resultAsTuple(cached_record, network_obj);
+    }
+
+    const value = cache.decode(db, found, decode_options) catch |err| {
+        pyoz.py.Py_DecRef(network_obj);
+        _module.getException(0).raise(@errorName(err));
+        return null;
+    };
+
+    const record_obj = frozenValueToPyObject(value, map_key_cache) orelse {
+        pyoz.py.Py_DecRef(network_obj);
+        return null;
+    };
+    py_cache.put(found.pointer, record_obj);
+
+    return resultAsTuple(record_obj, network_obj);
+}
+
+fn createScanIterator(
+    reader: *Reader,
+    network: []const u8,
+    fields: ?[]const u8,
+    map_key_cache: *MapKeyCache,
+) ?pyoz.LazyIterator(?*pyoz.PyObject, *IteratorState) {
+    const net = maxminddb.Network.parse(network) catch |err| {
+        return pyoz.raiseValueError(@errorName(err));
+    };
+
+    const state = allocator.create(IteratorState) catch |err| {
+        _module.getException(0).raise(@errorName(err));
+        return null;
+    };
+
+    state.reader = reader;
+    state.map_key_cache = map_key_cache;
+    state.py_cache = .{};
+
+    state.fields = if (fields) |fields_str|
+        Fields.parseAlloc(allocator, fields_str, ',') catch |err| {
+            allocator.destroy(state);
+            return pyoz.raiseValueError(@errorName(err));
+        }
+    else
+        .{};
+
+    state.cache = maxminddb.Cache(maxminddb.any.Value).init(allocator, .{}) catch |err| {
+        state.fields.deinit(allocator);
+        allocator.destroy(state);
+        _module.getException(0).raise(@errorName(err));
+        return null;
+    };
+
+    state.it = reader._db.entries(net, .{}) catch |err| {
+        state.cache.deinit();
+        state.fields.deinit(allocator);
+        allocator.destroy(state);
+
+        _module.getException(0).raise(@errorName(err));
+        return null;
+    };
+
+    return .{ .state = state };
+}
 
 /// Caches MMDB record keys, i.e., Python string objects for "city", "country", "en", etc.
 const MapKeyCache = struct {
@@ -324,29 +503,64 @@ const MapKeyCache = struct {
     }
 };
 
-fn recordAsTuple(
-    r: maxminddb.Result(maxminddb.any.Value),
-    cache: *MapKeyCache,
-) ?*pyoz.PyObject {
-    var net_buf: [64]u8 = undefined;
-    const net_str = std.fmt.bufPrint(&net_buf, "{f}", .{r.network}) catch |err| {
-        _module.getException(0).raise(@errorName(err));
-        return null;
+/// Caches frozen Python record objects (mappingproxy + tuples) keyed by MMDB data pointer.
+/// Adjacent networks often share the same record (same data pointer),
+/// so caching the Python object tree avoids rebuilding ~50 objects per cache hit.
+///
+/// Dicts are wrapped in PyDictProxy (read-only) and arrays in tuples
+/// so cached objects can be safely returned to multiple callers.
+/// It works alongside MapKeyCache (caches individual key strings) and
+/// the maxminddb.Cache (caches decoded any.Value to skip binary decoding).
+const PyDictCache = struct {
+    entries: [cache_size]Entry = [_]Entry{.{}} ** cache_size,
+
+    const cache_size = 16;
+    const Entry = struct {
+        pointer: usize = 0,
+        obj: ?*pyoz.py.PyObject = null,
     };
 
-    const network_obj = _module.toPy([]const u8, net_str) orelse {
-        return null;
-    };
-    const record_obj = anyValueToPyObject(r.value, cache) orelse {
-        pyoz.py.Py_DecRef(network_obj);
-        return null;
-    };
+    fn get(self: *PyDictCache, pointer: usize) ?*pyoz.py.PyObject {
+        const slot = pointer & (cache_size - 1);
+        const e = &self.entries[slot];
 
-    return resultAsTuple(record_obj, network_obj);
-}
+        // Cache hit.
+        if (e.obj != null and e.pointer == pointer) {
+            return e.obj.?;
+        }
 
-/// Converts any.Value we used to decode an MMDB record to a Python Object.
-fn anyValueToPyObject(src: maxminddb.any.Value, cache: *MapKeyCache) ?*pyoz.PyObject {
+        return null;
+    }
+
+    fn put(self: *PyDictCache, pointer: usize, obj: *pyoz.py.PyObject) void {
+        const slot = pointer & (cache_size - 1);
+        const e = &self.entries[slot];
+
+        if (e.obj) |old| {
+            pyoz.py.Py_DecRef(old);
+        }
+
+        pyoz.py.Py_IncRef(obj);
+        e.* = .{
+            .pointer = pointer,
+            .obj = obj,
+        };
+    }
+
+    fn deinit(self: *PyDictCache) void {
+        for (&self.entries) |*e| {
+            if (e.obj) |obj| {
+                pyoz.py.Py_DecRef(obj);
+                e.obj = null;
+            }
+        }
+    }
+};
+
+/// Converts any.Value to an immutable Python object tree.
+/// Dicts become mappingproxy (read-only view via PyDictProxy_New) and
+/// arrays become tuples so the result can be cached and shared safely.
+fn frozenValueToPyObject(src: maxminddb.any.Value, cache: *MapKeyCache) ?*pyoz.PyObject {
     return switch (src) {
         .map => |entries| {
             const dict = pyoz.py.PyDict_New() orelse return null;
@@ -357,7 +571,7 @@ fn anyValueToPyObject(src: maxminddb.any.Value, cache: *MapKeyCache) ?*pyoz.PyOb
                     return null;
                 };
 
-                const value_obj = anyValueToPyObject(entry.value, cache) orelse {
+                const value_obj = frozenValueToPyObject(entry.value, cache) orelse {
                     pyoz.py.Py_DecRef(key_obj);
                     pyoz.py.Py_DecRef(dict);
                     return null;
@@ -369,21 +583,25 @@ fn anyValueToPyObject(src: maxminddb.any.Value, cache: *MapKeyCache) ?*pyoz.PyOb
                 pyoz.py.Py_DecRef(value_obj);
             }
 
-            return dict;
+            // Wrap in read-only proxy.
+            const proxy: ?*pyoz.py.PyObject = pyoz.py.c.PyDictProxy_New(dict);
+            pyoz.py.Py_DecRef(dict);
+
+            return proxy;
         },
         .array => |items| {
-            const list = pyoz.py.PyList_New(@intCast(items.len)) orelse return null;
+            const tuple = pyoz.py.PyTuple_New(@intCast(items.len)) orelse return null;
 
             for (items, 0..) |item, i| {
-                const item_obj = anyValueToPyObject(item, cache) orelse {
-                    pyoz.py.Py_DecRef(list);
+                const item_obj = frozenValueToPyObject(item, cache) orelse {
+                    pyoz.py.Py_DecRef(tuple);
                     return null;
                 };
 
-                _ = pyoz.py.PyList_SetItem(list, @intCast(i), item_obj);
+                _ = pyoz.py.PyTuple_SetItem(tuple, @intCast(i), item_obj);
             }
 
-            return list;
+            return tuple;
         },
         .string => |v| _module.toPy([]const u8, v),
         .int32 => |v| _module.toPy(i32, v),
@@ -395,6 +613,16 @@ fn anyValueToPyObject(src: maxminddb.any.Value, cache: *MapKeyCache) ?*pyoz.PyOb
         .float => |v| _module.toPy(f32, v),
         .boolean => |v| _module.toPy(bool, v),
     };
+}
+
+fn formatNetwork(network: maxminddb.Network) ?*pyoz.PyObject {
+    var net_buf: [64]u8 = undefined;
+    const net_str = std.fmt.bufPrint(&net_buf, "{f}", .{network}) catch |err| {
+        _module.getException(0).raise(@errorName(err));
+        return null;
+    };
+
+    return _module.toPy([]const u8, net_str);
 }
 
 fn resultAsTuple(record: *pyoz.PyObject, network: *pyoz.PyObject) ?*pyoz.PyObject {
