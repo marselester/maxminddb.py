@@ -514,7 +514,7 @@ const MapKeyCache = struct {
 const PyDictCache = struct {
     entries: [cache_size]Entry = [_]Entry{.{}} ** cache_size,
 
-    const cache_size = 16;
+    const cache_size = 64;
     const Entry = struct {
         pointer: usize = 0,
         obj: ?*pyoz.py.PyObject = null,

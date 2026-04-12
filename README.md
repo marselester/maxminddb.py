@@ -246,9 +246,9 @@ Full GeoLite2-City scan (5.5M records).
 
 | Benchmark             | records per second |
 |---                    |---                 |
-| `scan()`              | ~458K              |
-| `scan(fields="city")` | ~1,585K            |
-| `only("city").scan()` | ~1,581K            |
+| `scan()`              | ~516K              |
+| `scan(fields="city")` | ~1,769K            |
+| `only("city").scan()` | ~1,765K            |
 
 <details>
 
@@ -265,27 +265,27 @@ $ for i in $(seq 1 10); do
     python3 benchmarks/scan.py --file=GeoLite2-City.mmdb --fields=city
   done
 
-5,502,351 records in 11.9s (462,925 records per second)
-5,502,351 records in 12.0s (457,851 records per second)
-5,502,351 records in 11.9s (460,881 records per second)
-5,502,351 records in 11.9s (461,628 records per second)
-5,502,351 records in 12.0s (460,330 records per second)
-5,502,351 records in 12.2s (449,738 records per second)
-5,502,351 records in 12.3s (448,512 records per second)
-5,502,351 records in 12.0s (458,593 records per second)
-5,502,351 records in 12.0s (459,672 records per second)
-5,502,351 records in 12.1s (454,881 records per second)
+5,502,351 records in 10.6s (517,073 records per second)
+5,502,351 records in 10.6s (520,035 records per second)
+5,502,351 records in 10.7s (514,611 records per second)
+5,502,351 records in 10.7s (513,001 records per second)
+5,502,351 records in 10.6s (517,634 records per second)
+5,502,351 records in 10.7s (514,480 records per second)
+5,502,351 records in 10.6s (517,013 records per second)
+5,502,351 records in 10.7s (512,102 records per second)
+5,502,351 records in 10.7s (516,537 records per second)
+5,502,351 records in 10.6s (517,771 records per second)
 ---
-5,502,351 records in 3.5s (1,581,645 records per second)
-5,502,351 records in 3.5s (1,581,727 records per second)
-5,502,351 records in 3.5s (1,587,987 records per second)
-5,502,351 records in 3.5s (1,579,110 records per second)
-5,502,351 records in 3.5s (1,584,325 records per second)
-5,502,351 records in 3.5s (1,587,564 records per second)
-5,502,351 records in 3.5s (1,582,710 records per second)
-5,502,351 records in 3.5s (1,592,054 records per second)
-5,502,351 records in 3.5s (1,592,082 records per second)
-5,502,351 records in 3.5s (1,579,074 records per second)
+5,502,351 records in 3.1s (1,760,571 records per second)
+5,502,351 records in 3.1s (1,775,104 records per second)
+5,502,351 records in 3.1s (1,776,625 records per second)
+5,502,351 records in 3.1s (1,766,162 records per second)
+5,502,351 records in 3.1s (1,765,702 records per second)
+5,502,351 records in 3.1s (1,775,493 records per second)
+5,502,351 records in 3.1s (1,766,543 records per second)
+5,502,351 records in 3.1s (1,768,793 records per second)
+5,502,351 records in 3.1s (1,767,081 records per second)
+5,502,351 records in 3.1s (1,770,212 records per second)
 ```
 
 </details>
@@ -299,16 +299,16 @@ $ for i in $(seq 1 10); do
     python3 benchmarks/only_scan.py --file=GeoLite2-City.mmdb
   done
 
-5,502,351 records in 3.5s (1,587,880 records per second)
-5,502,351 records in 3.5s (1,581,917 records per second)
-5,502,351 records in 3.5s (1,571,759 records per second)
-5,502,351 records in 3.5s (1,587,618 records per second)
-5,502,351 records in 3.5s (1,588,361 records per second)
-5,502,351 records in 3.5s (1,581,806 records per second)
-5,502,351 records in 3.5s (1,579,971 records per second)
-5,502,351 records in 3.5s (1,577,320 records per second)
-5,502,351 records in 3.5s (1,576,414 records per second)
-5,502,351 records in 3.5s (1,578,472 records per second)
+5,502,351 records in 3.1s (1,763,589 records per second)
+5,502,351 records in 3.1s (1,769,234 records per second)
+5,502,351 records in 3.1s (1,766,115 records per second)
+5,502,351 records in 3.1s (1,771,872 records per second)
+5,502,351 records in 3.1s (1,757,403 records per second)
+5,502,351 records in 3.1s (1,768,186 records per second)
+5,502,351 records in 3.1s (1,759,477 records per second)
+5,502,351 records in 3.1s (1,767,438 records per second)
+5,502,351 records in 3.1s (1,763,774 records per second)
+5,502,351 records in 3.1s (1,764,091 records per second)
 ```
 
 </details>
