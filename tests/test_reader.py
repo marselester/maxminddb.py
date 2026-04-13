@@ -11,7 +11,6 @@ def db():
     db = maxmind.Reader(TEST_DB)
     yield db
     db.close()
-    assert db.is_closed
 
 
 def test_open_db_not_found():
@@ -105,6 +104,12 @@ def test_scan_whole_db(db):
     assert count == sum(1 for _ in db.scan())
 
 
+def test_contains(db):
+    assert "89.160.20.128" in db
+    assert "0.0.0.0" not in db
+    assert "invalid" not in db
+
+
 def test_metadata(db):
     meta = db.metadata()
     assert meta["database_type"] == "GeoLite2-City"
@@ -117,29 +122,29 @@ def test_metadata(db):
     assert "en" in meta["languages"]
 
 
-def test_only_lookup(db):
-    q = db.only("city,continent")
+def test_query_lookup(db):
+    q = db.query("city,continent")
     r, net = q.lookup("89.160.20.128")
     assert r["city"]["names"]["en"] == "Linköping"
     assert "country" not in r
     assert net == "89.160.20.128/25"
 
 
-def test_only_lookup_not_found(db):
-    q = db.only("city")
+def test_query_lookup_not_found(db):
+    q = db.query("city")
     r, net = q.lookup("0.0.0.0")
     assert (r, net) == (None, None)
 
 
-def test_only_lookup_cached(db):
-    q = db.only("city")
+def test_query_lookup_cached(db):
+    q = db.query("city")
     r1, _ = q.lookup("89.160.20.128")
     r2, _ = q.lookup("89.160.20.128")
     assert r1["city"]["names"]["en"] == r2["city"]["names"]["en"]
 
 
-def test_only_scan(db):
-    q = db.only("city,continent")
+def test_query_scan(db):
+    q = db.query("city,continent")
     records = list(q.scan("89.160.20.0/24"))
     assert len(records) == 2
     for r, net in records:
@@ -147,23 +152,39 @@ def test_only_scan(db):
         assert "country" not in r
 
 
-def test_only_scan_whole_db(db):
-    q = db.only("city")
+def test_query_scan_whole_db(db):
+    q = db.query("city")
     count = sum(1 for _ in q.scan())
     assert count == 242
 
 
-def test_only_one_liner_scan(db):
-    count = sum(1 for _ in db.only("city").scan())
+def test_query_one_liner_scan(db):
+    count = sum(1 for _ in db.query("city").scan())
     assert count == 242
 
 
-def test_only_empty_fields(db):
-    q = db.only("")
+def test_query_no_fields(db):
+    """query() without args decodes all fields."""
+    q = db.query()
     r, _ = q.lookup("89.160.20.128")
     assert "city" in r
     assert "country" in r
     assert "location" in r
+
+
+def test_query_empty_fields(db):
+    q = db.query("")
+    r, _ = q.lookup("89.160.20.128")
+    assert "city" in r
+    assert "country" in r
+    assert "location" in r
+
+
+def test_query_too_many_fields(db):
+    with pytest.raises(ValueError, match="TooManyFields"):
+        db.query(
+            "a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,v,w,x,y,z,a1,b1,c1,d1,e1,f1,g1"
+        )
 
 
 def test_lookup_after_close():
@@ -194,24 +215,24 @@ def test_iter_after_close():
         iter(db)
 
 
-def test_only_after_close():
+def test_query_after_close():
     db = maxmind.Reader(TEST_DB)
     db.close()
     with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
-        db.only("city")
+        db.query("city")
 
 
-def test_only_lookup_after_close():
+def test_query_lookup_after_close():
     db = maxmind.Reader(TEST_DB)
-    q = db.only("city")
+    q = db.query("city")
     db.close()
     with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
         q.lookup("89.160.20.128")
 
 
-def test_only_scan_after_close():
+def test_query_scan_after_close():
     db = maxmind.Reader(TEST_DB)
-    q = db.only("city")
+    q = db.query("city")
     db.close()
     with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
         list(q.scan())

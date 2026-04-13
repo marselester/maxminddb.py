@@ -7,16 +7,16 @@ import timeit
 
 import maxmind
 
-parser = argparse.ArgumentParser(description="Benchmark db.only() lookups.")
+parser = argparse.ArgumentParser(description="Benchmark db.query() lookups.")
 parser.add_argument("--file", default="GeoLite2-City.mmdb", help="path to mmdb file")
-parser.add_argument("--fields", default="city", type=str, help="fields to decode")
+parser.add_argument("--fields", default="", type=str, help="fields to decode")
 parser.add_argument("--count", default=1_000_000, type=int, help="number of lookups")
 
 args = parser.parse_args()
 
 random.seed(0)
 db = maxmind.Reader(args.file)
-q = db.only(args.fields)
+q = db.query(args.fields)
 
 
 def lookup_ip_address() -> None:

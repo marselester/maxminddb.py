@@ -8,11 +8,8 @@ const Fields = maxminddb.Fields(32);
 
 /// Reads MaxMind DB files.
 pub const Reader = struct {
-    is_closed: bool,
+    _is_closed: bool,
     _db: maxminddb.Reader,
-    _lookup_cache: maxminddb.Cache(maxminddb.any.Value),
-    _map_key_cache: MapKeyCache,
-    _py_cache: PyDictCache = .{},
 
     const Self = @This();
     const all_ipv4 = "0.0.0.0/0";
@@ -30,7 +27,7 @@ pub const Reader = struct {
         );
         gil.acquire();
 
-        var db = db_or_err catch |err| {
+        const db = db_or_err catch |err| {
             // Raise ReaderException for db format errors.
             // OS errors (FileNotFound, AccessDenied, etc.) are left for PyOZ
             // to map to Python's built-in exceptions.
@@ -40,13 +37,10 @@ pub const Reader = struct {
 
             return err;
         };
-        errdefer db.close();
 
         return .{
             ._db = db,
-            ._lookup_cache = try maxminddb.Cache(maxminddb.any.Value).init(allocator, .{}),
-            ._map_key_cache = .{},
-            .is_closed = false,
+            ._is_closed = false,
         };
     }
 
@@ -80,18 +74,15 @@ pub const Reader = struct {
 
     /// Closes the Reader to free all resources.
     pub fn close(self: *Self) void {
-        if (!self.is_closed) {
-            self.is_closed = true;
-            self._py_cache.deinit();
-            self._map_key_cache.deinit();
-            self._lookup_cache.deinit();
+        if (!self._is_closed) {
+            self._is_closed = true;
             self._db.close();
         }
     }
 
     /// Returns db metadata.
     pub fn metadata(self: *Self) ?*pyoz.PyObject {
-        if (self.is_closed) {
+        if (self._is_closed) {
             _module.getException(0).raise("ReaderClosed");
             return null;
         }
@@ -108,13 +99,28 @@ pub const Reader = struct {
             return null;
         };
 
-        return frozenValueToPyObject(meta, &self._map_key_cache);
+        return frozenValueToPyObject(meta, null);
+    }
+
+    /// Checks if an IP address has a record in the database:
+    /// "1.2.3.4" in db
+    pub fn __contains__(self: *const Self, ip_address: []const u8) bool {
+        if (self._is_closed) {
+            return false;
+        }
+
+        const ip = std.net.Address.parseIp(ip_address, 0) catch return false;
+        const entry = @constCast(&self._db).find(ip, .{}) catch return false;
+
+        return entry != null;
     }
 
     /// Looks up a record by an IP address.
-    /// The returned value is a tuple (record, network) when it's found and (None, None) otherwise.
-    /// The ValueError exception indicates that an IP address is invalid.
-    /// The ReaderException is raised if a db read has failed.
+    /// Returns a tuple (record, network) when found and (None, None) otherwise.
+    /// ValueError is raised when the IP address is invalid.
+    /// ReaderException is raised when db reading fails.
+    ///
+    /// Use db.query() for repeated lookups for better performance.
     pub fn lookup(
         self: *Self,
         args: pyoz.Args(struct {
@@ -122,7 +128,7 @@ pub const Reader = struct {
             fields: ?[]const u8 = null,
         }),
     ) ?*pyoz.PyObject {
-        if (self.is_closed) {
+        if (self._is_closed) {
             _module.getException(0).raise("ReaderClosed");
             return null;
         }
@@ -131,47 +137,38 @@ pub const Reader = struct {
             return pyoz.raiseValueError(@errorName(err));
         };
 
-        if (args.value.fields) |fields_str| {
-            // Decode only requested fields, no caching.
-            const f = Fields.parse(fields_str, ',') catch |err| {
+        const parsed_fields = if (args.value.fields) |fields_str|
+            Fields.parse(fields_str, ',') catch |err| {
                 return pyoz.raiseValueError(@errorName(err));
-            };
+            }
+        else
+            Fields{};
 
-            const result = self._db.lookup(
-                maxminddb.any.Value,
-                allocator,
-                ip,
-                .{ .only = f.only() },
-            ) catch |err| {
-                _module.getException(0).raise(@errorName(err));
-                return null;
-            };
-
-            const r = result orelse return resultAsTuple(
-                pyoz.py.Py_RETURN_NONE(),
-                pyoz.py.Py_RETURN_NONE(),
-            );
-            defer r.deinit();
-
-            const record_obj = frozenValueToPyObject(r.value, &self._map_key_cache) orelse {
-                return null;
-            };
-            const network_obj = formatNetwork(r.network) orelse {
-                pyoz.py.Py_DecRef(record_obj);
-                return null;
-            };
-
-            return resultAsTuple(record_obj, network_obj);
-        }
-
-        return cachedLookup(
-            &self._db,
+        const result = self._db.lookup(
+            maxminddb.any.Value,
+            allocator,
             ip,
-            .{},
-            &self._py_cache,
-            &self._lookup_cache,
-            &self._map_key_cache,
+            .{ .only = parsed_fields.only() },
+        ) catch |err| {
+            _module.getException(0).raise(@errorName(err));
+            return null;
+        };
+
+        const r = result orelse return resultAsTuple(
+            pyoz.py.Py_RETURN_NONE(),
+            pyoz.py.Py_RETURN_NONE(),
         );
+        defer r.deinit();
+
+        const record_obj = frozenValueToPyObject(r.value, null) orelse {
+            return null;
+        };
+        const network_obj = formatNetwork(r.network) orelse {
+            pyoz.py.Py_DecRef(record_obj);
+            return null;
+        };
+
+        return resultAsTuple(record_obj, network_obj);
     }
 
     /// Scans networks within the given IP range (CIDR notation is also supported).
@@ -186,7 +183,7 @@ pub const Reader = struct {
             fields: ?[]const u8 = null,
         }),
     ) ?pyoz.LazyIterator(?*pyoz.PyObject, *IteratorState) {
-        if (self.is_closed) {
+        if (self._is_closed) {
             _module.getException(0).raise("ReaderClosed");
             return null;
         }
@@ -198,7 +195,6 @@ pub const Reader = struct {
             self,
             network,
             args.value.fields,
-            &self._map_key_cache,
         );
     }
 
@@ -207,46 +203,63 @@ pub const Reader = struct {
         return self.scan(.{ .value = .{} });
     }
 
-    /// Returns a cached, field-filtered view of the database.
-    /// Best for repeated lookups/scans with the same fields, e.g., used in web services.
+    /// Returns a cached view of the database, optionally filtered to specific fields.
+    /// Best for repeated lookups/scans, e.g., in web services.
     ///
-    /// q = db.only("city,country")
+    /// q = db.query("city,country")
     /// r, net = q.lookup(ip)
     ///
     /// for r, net in q.scan():
     ///     print(r, net)
     ///
-    /// For free-threaded Python, use per-thread `only()` instances.
-    pub fn only(self: *Self, fields_str: []const u8) !Only {
-        if (self.is_closed) {
+    /// For free-threaded Python, use per-thread `query()` instances.
+    pub fn query(
+        self: *Self,
+        args: pyoz.Args(struct {
+            fields: ?[]const u8 = null,
+        }),
+    ) !Query {
+        if (self._is_closed) {
             _module.getException(0).raise("ReaderClosed");
             return error.ReaderClosed;
         }
 
-        var parsed_fields = try Fields.parseAlloc(allocator, fields_str, ',');
+        var parsed_fields = if (args.value.fields) |s|
+            Fields.parseAlloc(allocator, s, ',') catch |err| {
+                _ = pyoz.raiseValueError(@errorName(err));
+                return err;
+            }
+        else
+            Fields{};
         errdefer parsed_fields.deinit(allocator);
 
-        return .{
-            .reader = self,
-            .fields = parsed_fields,
-            .cache = try maxminddb.Cache(maxminddb.any.Value).init(allocator, .{}),
+        var q = Query{
+            ._reader = self,
+            ._fields = parsed_fields,
+            ._cache = try maxminddb.Cache(maxminddb.any.Value).init(allocator, .{}),
         };
+        q._reader_ref.set(_module.selfObject(Reader, self));
+
+        return q;
     }
 };
 
-/// A cached, field-filtered view of a Reader created by Reader.only("city,country").
+/// A cached view of a Reader created by Reader.query().
 /// Fields are parsed once and the view has its own caches,
 /// so repeated lookups/scans benefit from both maxminddb.Cache and Python object caching.
-pub const Only = struct {
-    reader: *Reader,
-    fields: Fields,
-    cache: maxminddb.Cache(maxminddb.any.Value),
-    map_key_cache: MapKeyCache = .{},
-    py_cache: PyDictCache = .{},
+pub const Query = struct {
+    _reader: *Reader,
+    // Prevent Reader from being GC'd while this Query is alive.
+    // PyOZ auto-calls clear() on Ref fields during deallocation.
+    _reader_ref: pyoz.Ref(Reader) = .{},
+    _fields: Fields,
+    _cache: maxminddb.Cache(maxminddb.any.Value),
+    _map_key_cache: MapKeyCache = .{},
+    _py_cache: PyDictCache = .{},
 
-    /// Looks up a record by an IP address using cached field-filtered decoding.
-    pub fn lookup(self: *Only, ip_address: []const u8) ?*pyoz.PyObject {
-        if (self.reader.is_closed) {
+    /// Looks up a record by an IP address using cached decoding.
+    pub fn lookup(self: *Query, ip_address: []const u8) ?*pyoz.PyObject {
+        if (self._reader._is_closed) {
             _module.getException(0).raise("ReaderClosed");
             return null;
         }
@@ -255,57 +268,82 @@ pub const Only = struct {
             return pyoz.raiseValueError(@errorName(err));
         };
 
-        return cachedLookup(
-            &self.reader._db,
-            ip,
-            .{ .only = self.fields.only() },
-            &self.py_cache,
-            &self.cache,
-            &self.map_key_cache,
+        const entry = self._reader._db.find(ip, .{}) catch |err| {
+            _module.getException(0).raise(@errorName(err));
+            return null;
+        } orelse return resultAsTuple(
+            pyoz.py.Py_RETURN_NONE(),
+            pyoz.py.Py_RETURN_NONE(),
         );
+
+        const network_obj = formatNetwork(entry.network) orelse return null;
+
+        if (self._py_cache.get(entry.pointer)) |cached_record| {
+            pyoz.py.Py_IncRef(cached_record);
+            return resultAsTuple(cached_record, network_obj);
+        }
+
+        const value = self._cache.decode(
+            &self._reader._db,
+            entry,
+            .{ .only = self._fields.only() },
+        ) catch |err| {
+            pyoz.py.Py_DecRef(network_obj);
+            _module.getException(0).raise(@errorName(err));
+            return null;
+        };
+
+        const record_obj = frozenValueToPyObject(value, &self._map_key_cache) orelse {
+            pyoz.py.Py_DecRef(network_obj);
+            return null;
+        };
+        self._py_cache.put(entry.pointer, record_obj);
+
+        return resultAsTuple(record_obj, network_obj);
     }
 
-    /// Scans networks using cached field-filtered decoding.
+    /// Scans networks using cached decoding.
     pub fn scan(
-        self: *Only,
+        self: *Query,
         args: pyoz.Args(struct {
             network: ?[]const u8 = null,
         }),
     ) ?pyoz.LazyIterator(?*pyoz.PyObject, *IteratorState) {
-        if (self.reader.is_closed) {
+        if (self._reader._is_closed) {
             _module.getException(0).raise("ReaderClosed");
             return null;
         }
 
         const network = args.value.network orelse
-            if (self.reader._db.metadata.ip_version == 6) Reader.all_ipv6 else Reader.all_ipv4;
+            if (self._reader._db.metadata.ip_version == 6) Reader.all_ipv6 else Reader.all_ipv4;
 
         return createScanIterator(
-            self.reader,
+            self._reader,
             network,
-            self.fields.buf,
-            &self.map_key_cache,
+            self._fields.buf,
         );
     }
 
-    pub fn __del__(self: *Only) void {
-        self.py_cache.deinit();
-        self.map_key_cache.deinit();
-        self.cache.deinit();
-        self.fields.deinit(allocator);
+    pub fn __del__(self: *Query) void {
+        self._py_cache.deinit();
+        self._map_key_cache.deinit();
+        self._cache.deinit();
+        self._fields.deinit(allocator);
     }
 };
 
 const IteratorState = struct {
     reader: *Reader,
+    // IncRef'd to prevent Reader from being GC'd while iterating.
+    reader_obj: *pyoz.py.PyObject,
     it: maxminddb.EntryIterator,
     fields: Fields,
     cache: maxminddb.Cache(maxminddb.any.Value),
-    map_key_cache: *MapKeyCache,
+    map_key_cache: MapKeyCache,
     py_cache: PyDictCache = .{},
 
     pub fn next(self: *IteratorState) ?*pyoz.PyObject {
-        if (self.reader.is_closed) {
+        if (self.reader._is_closed) {
             _module.getException(0).raise("ReaderClosed");
             return null;
         }
@@ -324,7 +362,6 @@ const IteratorState = struct {
         // Python dict cache hit.
         if (self.py_cache.get(entry.pointer)) |cached_record| {
             pyoz.py.Py_IncRef(cached_record);
-
             return resultAsTuple(cached_record, network_obj);
         }
 
@@ -336,11 +373,10 @@ const IteratorState = struct {
         ) catch |err| {
             pyoz.py.Py_DecRef(network_obj);
             _module.getException(0).raise(@errorName(err));
-
             return null;
         };
 
-        const record_obj = frozenValueToPyObject(value, self.map_key_cache) orelse {
+        const record_obj = frozenValueToPyObject(value, &self.map_key_cache) orelse {
             pyoz.py.Py_DecRef(network_obj);
             return null;
         };
@@ -351,57 +387,18 @@ const IteratorState = struct {
 
     pub fn deinit(self: *IteratorState) void {
         self.py_cache.deinit();
+        self.map_key_cache.deinit();
         self.cache.deinit();
         self.fields.deinit(allocator);
+        pyoz.py.Py_DecRef(self.reader_obj);
         allocator.destroy(self);
     }
 };
-
-fn cachedLookup(
-    db: *maxminddb.Reader,
-    ip: std.net.Address,
-    decode_options: maxminddb.Reader.DecodeOptions,
-    py_cache: *PyDictCache,
-    cache: *maxminddb.Cache(maxminddb.any.Value),
-    map_key_cache: *MapKeyCache,
-) ?*pyoz.PyObject {
-    const found = db.find(ip, .{}) catch |err| {
-        _module.getException(0).raise(@errorName(err));
-        return null;
-    } orelse return resultAsTuple(
-        pyoz.py.Py_RETURN_NONE(),
-        pyoz.py.Py_RETURN_NONE(),
-    );
-
-    const network_obj = formatNetwork(found.network) orelse {
-        return null;
-    };
-
-    if (py_cache.get(found.pointer)) |cached_record| {
-        pyoz.py.Py_IncRef(cached_record);
-        return resultAsTuple(cached_record, network_obj);
-    }
-
-    const value = cache.decode(db, found, decode_options) catch |err| {
-        pyoz.py.Py_DecRef(network_obj);
-        _module.getException(0).raise(@errorName(err));
-        return null;
-    };
-
-    const record_obj = frozenValueToPyObject(value, map_key_cache) orelse {
-        pyoz.py.Py_DecRef(network_obj);
-        return null;
-    };
-    py_cache.put(found.pointer, record_obj);
-
-    return resultAsTuple(record_obj, network_obj);
-}
 
 fn createScanIterator(
     reader: *Reader,
     network: []const u8,
     fields: ?[]const u8,
-    map_key_cache: *MapKeyCache,
 ) ?pyoz.LazyIterator(?*pyoz.PyObject, *IteratorState) {
     const net = maxminddb.Network.parse(network) catch |err| {
         return pyoz.raiseValueError(@errorName(err));
@@ -412,12 +409,17 @@ fn createScanIterator(
         return null;
     };
 
+    const reader_obj = _module.selfObject(Reader, reader);
+    pyoz.py.Py_IncRef(reader_obj);
+
     state.reader = reader;
-    state.map_key_cache = map_key_cache;
+    state.reader_obj = reader_obj;
+    state.map_key_cache = .{};
     state.py_cache = .{};
 
     state.fields = if (fields) |fields_str|
         Fields.parseAlloc(allocator, fields_str, ',') catch |err| {
+            pyoz.py.Py_DecRef(reader_obj);
             allocator.destroy(state);
             return pyoz.raiseValueError(@errorName(err));
         }
@@ -426,6 +428,7 @@ fn createScanIterator(
 
     state.cache = maxminddb.Cache(maxminddb.any.Value).init(allocator, .{}) catch |err| {
         state.fields.deinit(allocator);
+        pyoz.py.Py_DecRef(reader_obj);
         allocator.destroy(state);
         _module.getException(0).raise(@errorName(err));
         return null;
@@ -434,8 +437,8 @@ fn createScanIterator(
     state.it = reader._db.entries(net, .{}) catch |err| {
         state.cache.deinit();
         state.fields.deinit(allocator);
+        pyoz.py.Py_DecRef(reader_obj);
         allocator.destroy(state);
-
         _module.getException(0).raise(@errorName(err));
         return null;
     };
@@ -560,13 +563,16 @@ const PyDictCache = struct {
 /// Converts any.Value to an immutable Python object tree.
 /// Dicts become mappingproxy (read-only view via PyDictProxy_New) and
 /// arrays become tuples so the result can be cached and shared safely.
-fn frozenValueToPyObject(src: maxminddb.any.Value, cache: *MapKeyCache) ?*pyoz.PyObject {
+fn frozenValueToPyObject(src: maxminddb.any.Value, cache: ?*MapKeyCache) ?*pyoz.PyObject {
     return switch (src) {
         .map => |entries| {
             const dict = pyoz.py.PyDict_New() orelse return null;
 
             for (entries) |entry| {
-                const key_obj = cache.intern(entry.key) orelse {
+                const key_obj = (if (cache) |c|
+                    c.intern(entry.key)
+                else
+                    _module.toPy([]const u8, entry.key)) orelse {
                     pyoz.py.Py_DecRef(dict);
                     return null;
                 };

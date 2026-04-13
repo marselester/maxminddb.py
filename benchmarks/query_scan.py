@@ -4,14 +4,14 @@ import timeit
 
 import maxmind
 
-parser = argparse.ArgumentParser(description="Benchmark db.only() scans.")
+parser = argparse.ArgumentParser(description="Benchmark db.query() scans.")
 parser.add_argument("--file", default="GeoLite2-City.mmdb", help="path to mmdb file")
-parser.add_argument("--fields", default="city", type=str, help="fields to decode")
+parser.add_argument("--fields", default="", type=str, help="fields to decode")
 
 args = parser.parse_args()
 
 db = maxmind.Reader(args.file)
-q = db.only(args.fields)
+q = db.query(args.fields)
 
 start = timeit.default_timer()
 n = sum(1 for _ in q.scan())
