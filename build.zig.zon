@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .PyOZ = .{
-            .url = "git+https://github.com/marselester/PyOZ#27f30494412fca75efd4e54ff22f87e3b53d5eae",
-            .hash = "PyOZ-0.12.2-ntlpPqQnGACswiui0uF0ahU0AhP139NFZfJZGEQ4H_Mw",
+            .url = "git+https://github.com/marselester/PyOZ#00374aee556622cb8e56617ab095dc66e12a3717",
+            .hash = "PyOZ-0.12.2-ntlpPv4yGACinf_pyMdqaQu8oTXcxlZAnNT29XE14UUK",
         },
         .maxminddb = .{
             .url = "git+https://github.com/marselester/maxminddb.zig?ref=master#a560f532a21a8078134127ad3569a24809f7150c",
