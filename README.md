@@ -7,10 +7,14 @@ See also [Rust](https://github.com/oschwald/maxminddb-rust-python),
 
 ## Quick start
 
-```python
-import maxmind
+```sh
+pip install maxminddb-zig
+```
 
-with maxmind.Reader('GeoLite2-City.mmdb') as db:
+```python
+import maxminddb_zig
+
+with maxminddb_zig.Reader('GeoLite2-City.mmdb') as db:
     r, net = db.lookup('89.160.20.128')
     print(net, r['city']['names']['en'])
 
@@ -21,10 +25,10 @@ FastAPI middleware example:
 
 ```python
 from fastapi import FastAPI, Request
-import maxmind
+import maxminddb_zig
 
 app = FastAPI()
-db = maxmind.Reader("GeoLite2-City.mmdb")
+db = maxminddb_zig.Reader("GeoLite2-City.mmdb")
 geo = db.query("country")
 
 
@@ -41,13 +45,13 @@ The `Reader` opens a MaxMind DB file for reading.
 Make sure to close it unless you're using a context manager.
 
 ```python
-import maxmind
+import maxminddb_zig
 
-db = maxmind.Reader('GeoLite2-City.mmdb')
+db = maxminddb_zig.Reader('GeoLite2-City.mmdb')
 db.lookup('89.160.20.128')
 db.close()
 
-with maxmind.Reader('GeoLite2-City.mmdb') as db:
+with maxminddb_zig.Reader('GeoLite2-City.mmdb') as db:
     db.lookup('89.160.20.128')
 ```
 
@@ -117,7 +121,7 @@ because each `query()` owns its caches.
 Don't share the same `query()` instance between threads.
 
 ```python
-db = maxmind.Reader('GeoLite2-City.mmdb')
+db = maxminddb_zig.Reader('GeoLite2-City.mmdb')
 
 def worker():
     q = db.query()

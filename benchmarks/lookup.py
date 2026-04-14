@@ -6,7 +6,7 @@ import socket
 import struct
 import timeit
 
-import maxmind
+import maxminddb_zig
 
 parser = argparse.ArgumentParser(description="Benchmark lookups.")
 parser.add_argument("--file", default="GeoLite2-City.mmdb", help="path to mmdb file")
@@ -16,7 +16,7 @@ parser.add_argument("--count", default=1_000_000, type=int, help="number of look
 args = parser.parse_args()
 
 random.seed(0)
-db = maxmind.Reader(args.file)
+db = maxminddb_zig.Reader(args.file)
 
 
 def lookup_ip_address() -> None:

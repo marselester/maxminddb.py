@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const library_name = "maxmind";
+const library_name = "maxminddb_zig";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});

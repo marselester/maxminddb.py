@@ -1,20 +1,13 @@
-name: CI
+name: Release
 
-on: [push]
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
 
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
-      - run: pip install ruff
-      - run: ruff check
-      - run: ruff format --check
-
-  test:
+  build:
     strategy:
       matrix:
         os:
@@ -23,15 +16,10 @@ jobs:
           - macos-latest
           - macos-15-intel
           - windows-latest
-          - windows-11-arm
-        python-version: ["3.14"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.13t", "3.14", "3.14t"]
         include:
-          - os: ubuntu-latest
-            python-version: "3.10"
-          - os: ubuntu-latest
-            python-version: "3.13t"
-          - os: ubuntu-latest
-            python-version: "3.14t"
+          - os: windows-11-arm
+            python-version: "3.14"
 
     runs-on: ${{ matrix.os }}
 
@@ -53,8 +41,30 @@ jobs:
           cd PyOZ && zig build cli
       - name: Install dependencies
         run: pip install pytest
-      - name: Build
+      - name: Build wheel
         shell: bash
-        run: PyOZ/zig-out/bin/pyoz develop
+        run: PyOZ/zig-out/bin/pyoz build
       - name: Run tests
-        run: pytest -vs
+        shell: bash
+        run: |
+          pip install dist/*.whl
+          pytest -vs
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.os }}-${{ matrix.python-version }}
+          path: dist/*.whl
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
