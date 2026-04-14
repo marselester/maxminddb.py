@@ -5,7 +5,7 @@ import struct
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-import maxmind
+import maxminddb_zig
 
 parser = argparse.ArgumentParser(description="Benchmark concurrent lookups.")
 parser.add_argument("--file", default="GeoLite2-City.mmdb", help="path to mmdb file")
@@ -25,7 +25,7 @@ def random_ips(seed, count):
 
 thread_ips = [random_ips(t, args.count) for t in range(args.threads)]
 
-db = maxmind.Reader(args.file)
+db = maxminddb_zig.Reader(args.file)
 
 
 def lookup_query(thread_id):

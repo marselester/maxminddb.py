@@ -1,6 +1,6 @@
 import types
 
-import maxmind
+import maxminddb_zig
 import pytest
 
 TEST_DB = "test-data/test-data/GeoLite2-City-Test.mmdb"
@@ -8,29 +8,31 @@ TEST_DB = "test-data/test-data/GeoLite2-City-Test.mmdb"
 
 @pytest.fixture(scope="session")
 def db():
-    db = maxmind.Reader(TEST_DB)
+    db = maxminddb_zig.Reader(TEST_DB)
     yield db
     db.close()
 
 
 def test_open_db_not_found():
     with pytest.raises(FileNotFoundError, match="FileNotFound"):
-        maxmind.Reader("notfound.mmdb")
+        maxminddb_zig.Reader("notfound.mmdb")
 
 
 def test_open_db_corrupted():
-    with pytest.raises(maxmind.ReaderException, match="CorruptedTree"):
-        maxmind.Reader("test-data/test-data/GeoIP2-City-Test-Invalid-Node-Count.mmdb")
+    with pytest.raises(maxminddb_zig.ReaderException, match="CorruptedTree"):
+        maxminddb_zig.Reader(
+            "test-data/test-data/GeoIP2-City-Test-Invalid-Node-Count.mmdb"
+        )
 
 
 def test_open_db_context_manager():
-    with maxmind.Reader(TEST_DB) as db:
+    with maxminddb_zig.Reader(TEST_DB) as db:
         r, _ = db.lookup("89.160.20.128")
         assert r
 
 
 def test_close_db_idempotent():
-    db = maxmind.Reader(TEST_DB)
+    db = maxminddb_zig.Reader(TEST_DB)
     r, _ = db.lookup("89.160.20.128")
     assert r
     db.close()
@@ -209,67 +211,67 @@ def test_json_lookup_not_found(db):
 
 
 def test_json_after_close():
-    db = maxmind.Reader(TEST_DB)
+    db = maxminddb_zig.Reader(TEST_DB)
     j = db.json("city")
     db.close()
-    with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
+    with pytest.raises(maxminddb_zig.ReaderException, match="ReaderClosed"):
         j.lookup("89.160.20.128")
 
 
 def test_lookup_after_close():
-    db = maxmind.Reader(TEST_DB)
+    db = maxminddb_zig.Reader(TEST_DB)
     db.close()
-    with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
+    with pytest.raises(maxminddb_zig.ReaderException, match="ReaderClosed"):
         db.lookup("89.160.20.128")
 
 
 def test_scan_after_close():
-    db = maxmind.Reader(TEST_DB)
+    db = maxminddb_zig.Reader(TEST_DB)
     db.close()
-    with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
+    with pytest.raises(maxminddb_zig.ReaderException, match="ReaderClosed"):
         db.scan()
 
 
 def test_metadata_after_close():
-    db = maxmind.Reader(TEST_DB)
+    db = maxminddb_zig.Reader(TEST_DB)
     db.close()
-    with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
+    with pytest.raises(maxminddb_zig.ReaderException, match="ReaderClosed"):
         db.metadata()
 
 
 def test_iter_after_close():
-    db = maxmind.Reader(TEST_DB)
+    db = maxminddb_zig.Reader(TEST_DB)
     db.close()
-    with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
+    with pytest.raises(maxminddb_zig.ReaderException, match="ReaderClosed"):
         iter(db)
 
 
 def test_query_after_close():
-    db = maxmind.Reader(TEST_DB)
+    db = maxminddb_zig.Reader(TEST_DB)
     db.close()
-    with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
+    with pytest.raises(maxminddb_zig.ReaderException, match="ReaderClosed"):
         db.query("city")
 
 
 def test_query_lookup_after_close():
-    db = maxmind.Reader(TEST_DB)
+    db = maxminddb_zig.Reader(TEST_DB)
     q = db.query("city")
     db.close()
-    with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
+    with pytest.raises(maxminddb_zig.ReaderException, match="ReaderClosed"):
         q.lookup("89.160.20.128")
 
 
 def test_query_scan_after_close():
-    db = maxmind.Reader(TEST_DB)
+    db = maxminddb_zig.Reader(TEST_DB)
     q = db.query("city")
     db.close()
-    with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
+    with pytest.raises(maxminddb_zig.ReaderException, match="ReaderClosed"):
         list(q.scan())
 
 
 def test_iterator_after_close():
-    db = maxmind.Reader(TEST_DB)
+    db = maxminddb_zig.Reader(TEST_DB)
     it = iter(db.scan())
     db.close()
-    with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
+    with pytest.raises(maxminddb_zig.ReaderException, match="ReaderClosed"):
         next(it)

@@ -16,7 +16,7 @@ pub const Reader = struct {
     const all_ipv6 = "::/0";
 
     /// Opens a MaxMind DB file, for example:
-    /// r = maxmind.Reader('GeoLite2-City.mmdb')
+    /// r = maxminddb_zig.Reader('GeoLite2-City.mmdb')
     pub fn __new__(path: []const u8) !Reader {
         // Release GIL during mmap and index building.
         const gil = pyoz.releaseGIL();
@@ -59,7 +59,7 @@ pub const Reader = struct {
     }
 
     /// Context manager protocol, for example:
-    /// with maxmind.Reader('GeoLite2-City.mmdb') as r:
+    /// with maxminddb_zig.Reader('GeoLite2-City.mmdb') as r:
     ///     r.lookup('89.160.20.129')
     pub fn __enter__(self: *Self) *Self {
         return self;
@@ -767,7 +767,7 @@ fn resultAsTuple(record: *pyoz.PyObject, network: *pyoz.PyObject) ?*pyoz.PyObjec
 }
 
 pub const _module = pyoz.module(.{
-    .name = "maxmind",
+    .name = "maxminddb_zig",
     .from = &.{@This()},
     .exceptions = &.{
         pyoz.exception("ReaderException", .Exception),

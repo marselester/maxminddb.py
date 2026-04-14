@@ -2,7 +2,7 @@
 import argparse
 import timeit
 
-import maxmind
+import maxminddb_zig
 
 parser = argparse.ArgumentParser(description="Benchmark full db scan.")
 parser.add_argument("--file", default="GeoLite2-City.mmdb", help="path to mmdb file")
@@ -10,7 +10,7 @@ parser.add_argument("--fields", default=None, type=str, help="fields to decode")
 
 args = parser.parse_args()
 
-db = maxmind.Reader(args.file)
+db = maxminddb_zig.Reader(args.file)
 
 start = timeit.default_timer()
 n = sum(1 for _ in db.scan(fields=args.fields))
