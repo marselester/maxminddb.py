@@ -242,6 +242,40 @@ pub const Reader = struct {
 
         return q;
     }
+
+    /// Like query() but returns JSON strings instead of Python dicts.
+    ///
+    /// j = db.json("city,country")
+    /// r, net = j.lookup(ip)
+    pub fn json(
+        self: *Self,
+        args: pyoz.Args(struct {
+            fields: ?[]const u8 = null,
+        }),
+    ) !JSONQuery {
+        if (self._is_closed) {
+            _module.getException(0).raise("ReaderClosed");
+            return error.ReaderClosed;
+        }
+
+        var parsed_fields = if (args.value.fields) |s|
+            Fields.parseAlloc(allocator, s, ',') catch |err| {
+                _ = pyoz.raiseValueError(@errorName(err));
+                return err;
+            }
+        else
+            Fields{};
+        errdefer parsed_fields.deinit(allocator);
+
+        var jq = JSONQuery{
+            ._reader = self,
+            ._fields = parsed_fields,
+            ._cache = try maxminddb.Cache(maxminddb.any.Value).init(allocator, .{}),
+        };
+        jq._reader_ref.set(_module.selfObject(Reader, self));
+
+        return jq;
+    }
 };
 
 /// A cached view of a Reader created by Reader.query().
@@ -329,6 +363,94 @@ pub const Query = struct {
         self._map_key_cache.deinit();
         self._cache.deinit();
         self._fields.deinit(allocator);
+    }
+};
+
+/// Like Query but returns JSON strings instead of Python dicts.
+/// Skips building lots of Python objects per record.
+pub const JSONQuery = struct {
+    _reader: *Reader,
+    _reader_ref: pyoz.Ref(Reader) = .{},
+    _fields: Fields,
+    _cache: maxminddb.Cache(maxminddb.any.Value),
+    _json_cache: PyDictCache = .{},
+    _arena: std.heap.ArenaAllocator = std.heap.ArenaAllocator.init(allocator),
+
+    // 4KB covers most records.
+    const json_buf_size = 4096;
+
+    /// Looks up a record and returns (json_str, network) or (None, None).
+    pub fn lookup(self: *JSONQuery, ip_address: []const u8) ?*pyoz.PyObject {
+        if (self._reader._is_closed) {
+            _module.getException(0).raise("ReaderClosed");
+            return null;
+        }
+
+        const ip = std.net.Address.parseIp(ip_address, 0) catch |err| {
+            return pyoz.raiseValueError(@errorName(err));
+        };
+
+        const entry = self._reader._db.find(ip, .{}) catch |err| {
+            _module.getException(0).raise(@errorName(err));
+            return null;
+        } orelse return resultAsTuple(
+            pyoz.py.Py_RETURN_NONE(),
+            pyoz.py.Py_RETURN_NONE(),
+        );
+
+        const network_obj = formatNetwork(entry.network) orelse return null;
+
+        // JSON string cache hit.
+        if (self._json_cache.get(entry.pointer)) |cached_json| {
+            pyoz.py.Py_IncRef(cached_json);
+            return resultAsTuple(cached_json, network_obj);
+        }
+
+        const value = self._cache.decode(
+            &self._reader._db,
+            entry,
+            .{ .only = self._fields.only() },
+        ) catch |err| {
+            pyoz.py.Py_DecRef(network_obj);
+            _module.getException(0).raise(@errorName(err));
+            return null;
+        };
+
+        const json_obj = self.formatJSON(value) orelse {
+            pyoz.py.Py_DecRef(network_obj);
+            return null;
+        };
+        self._json_cache.put(entry.pointer, json_obj);
+
+        return resultAsTuple(json_obj, network_obj);
+    }
+
+    /// Formats any.Value as a JSON Python string using a stack buffer with arena fallback.
+    fn formatJSON(self: *JSONQuery, value: maxminddb.any.Value) ?*pyoz.PyObject {
+        var buf: [json_buf_size]u8 = undefined;
+        var w = std.io.Writer.fixed(&buf);
+
+        if (value.format(&w)) {
+            return _module.toPy([]const u8, w.buffer[0..w.end]);
+        } else |_| {
+            var list: std.ArrayListUnmanaged(u8) = .{};
+            value.format(list.writer(self._arena.allocator())) catch |err| {
+                _module.getException(0).raise(@errorName(err));
+                return null;
+            };
+
+            const result = _module.toPy([]const u8, list.items);
+            _ = self._arena.reset(.retain_capacity);
+
+            return result;
+        }
+    }
+
+    pub fn __del__(self: *JSONQuery) void {
+        self._json_cache.deinit();
+        self._cache.deinit();
+        self._fields.deinit(allocator);
+        self._arena.deinit();
     }
 };
 

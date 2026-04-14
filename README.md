@@ -77,10 +77,17 @@ Pass field names to decode only specific fields.
 
 ```python
 q = db.query("city,country")
-q.lookup("89.160.20.128")
+r, net = q.lookup("89.160.20.128")
 
 for r, net in q.scan():
     print(net, r)
+```
+
+Use `json()` for the fastest lookups.
+
+```python
+j = db.json("city,country")
+r, net = j.lookup("89.160.20.128")
 ```
 
 You can check if an IP address is in the database without decoding the record.
@@ -121,12 +128,12 @@ def worker():
 Free-threaded `query().lookup()` numbers on Apple M2 Pro (GeoLite2-City)
 show difference between GIL and no GIL concurrency.
 
-| Threads | GIL       | Free-threading |
-|---      |---        |---             |
-| 1       | ~1,024K/s | ~1,005K/s      |
-| 2       | ~1,034K/s | ~1,952K/s      |
-| 4       | ~1,035K/s | ~3,590K/s      |
-| 8       | ~1,036K/s | ~5,269K/s      |
+| Threads | GIL     | Free-threading |
+|---      |---      |---             |
+| 1       | ~316K/s | ~321K/s        |
+| 2       | ~312K/s | ~627K/s        |
+| 4       | ~307K/s | ~1,226K/s      |
+| 8       | ~303K/s | ~1,850K/s      |
 
 With the GIL, throughput stays flat.
 
@@ -137,25 +144,25 @@ With the GIL, throughput stays flat.
 ```sh
 $ for t in 1 2 4 8; do
       PYTHON_GIL=1 python benchmarks/threads_lookup.py \
-          --file=GeoLite2-City.mmdb --fields=city --threads=$t
+          --file=GeoLite2-City.mmdb --threads=$t
   done
 
   echo '---'
 
   for t in 1 2 4 8; do
       PYTHON_GIL=0 python benchmarks/threads_lookup.py \
-          --file=GeoLite2-City.mmdb --fields=city --threads=$t
+          --file=GeoLite2-City.mmdb --threads=$t
   done
 
-1 threads: 1,024,475 lookups/s (0.98s)
-2 threads: 1,034,136 lookups/s (1.93s)
-4 threads: 1,035,279 lookups/s (3.86s)
-8 threads: 1,035,886 lookups/s (7.72s)
+1 threads: 316,004 lookups/s (3.16s)
+2 threads: 311,858 lookups/s (6.41s)
+4 threads: 306,872 lookups/s (13.03s)
+8 threads: 303,335 lookups/s (26.37s)
 ---
-1 threads: 1,004,677 lookups/s (1.00s)
-2 threads: 1,951,560 lookups/s (1.02s)
-4 threads: 3,590,088 lookups/s (1.11s)
-8 threads: 5,268,850 lookups/s (1.52s)
+1 threads: 320,845 lookups/s (3.12s)
+2 threads: 627,379 lookups/s (3.19s)
+4 threads: 1,225,835 lookups/s (3.26s)
+8 threads: 1,849,511 lookups/s (4.33s)
 ```
 
 </details>
@@ -191,6 +198,8 @@ The impact depends on the database:
   The benefit is highest on databases with few unique records, e.g., GeoLite2-Country.
   For scans, `query()` doesn't add meaningful benefit over `scan(fields=...)`
   because both use caching internally.
+- `json()` is the fastest path because it skips building Python objects and
+  formats JSON directly from decoded data.
 
 Here are reference results on Apple M2 Pro against GeoLite2-City.
 
@@ -200,10 +209,12 @@ Here are reference results on Apple M2 Pro against GeoLite2-City.
 
 | Benchmark                  | lookups per second |
 |---                         |---                 |
-| `lookup(ip)`               | ~165K              |
-| `query().lookup(ip)`       | ~268K              |
-| `lookup(ip, "city")`       | ~546K              |
-| `query("city").lookup(ip)` | ~681K              |
+| `lookup(ip)`               | ~170K              |
+| `query().lookup(ip)`       | ~277K              |
+| `json().lookup(ip)`        | ~511K              |
+| `lookup(ip, "city")`       | ~559K              |
+| `query("city").lookup(ip)` | ~696K              |
+| `json("city").lookup(ip)`  | ~805K              |
 
 <details>
 
@@ -220,73 +231,107 @@ $ for i in $(seq 1 10); do
     python benchmarks/lookup.py --file=GeoLite2-City.mmdb --fields=city
   done
 
-1,000,000 records in 6.1s (164,487 lookups per second)
-1,000,000 records in 6.1s (165,099 lookups per second)
-1,000,000 records in 6.1s (165,114 lookups per second)
-1,000,000 records in 6.1s (164,612 lookups per second)
-1,000,000 records in 6.1s (165,271 lookups per second)
-1,000,000 records in 6.1s (164,997 lookups per second)
-1,000,000 records in 6.1s (164,506 lookups per second)
-1,000,000 records in 6.1s (163,500 lookups per second)
-1,000,000 records in 6.1s (164,408 lookups per second)
-1,000,000 records in 6.1s (164,348 lookups per second)
+1,000,000 records in 5.9s (169,552 lookups per second)
+1,000,000 records in 5.9s (169,227 lookups per second)
+1,000,000 records in 5.9s (168,292 lookups per second)
+1,000,000 records in 5.9s (169,891 lookups per second)
+1,000,000 records in 5.9s (170,920 lookups per second)
+1,000,000 records in 5.9s (170,487 lookups per second)
+1,000,000 records in 5.9s (170,208 lookups per second)
+1,000,000 records in 5.9s (169,469 lookups per second)
+1,000,000 records in 6.0s (167,375 lookups per second)
+1,000,000 records in 5.9s (170,594 lookups per second)
 ---
-1,000,000 records in 1.8s (549,131 lookups per second)
-1,000,000 records in 1.8s (545,391 lookups per second)
-1,000,000 records in 1.8s (543,610 lookups per second)
-1,000,000 records in 1.9s (539,345 lookups per second)
-1,000,000 records in 1.8s (545,578 lookups per second)
-1,000,000 records in 1.8s (542,915 lookups per second)
-1,000,000 records in 1.8s (548,688 lookups per second)
-1,000,000 records in 1.8s (546,562 lookups per second)
-1,000,000 records in 1.8s (548,143 lookups per second)
-1,000,000 records in 1.8s (554,557 lookups per second)
+1,000,000 records in 1.8s (544,006 lookups per second)
+1,000,000 records in 1.8s (555,160 lookups per second)
+1,000,000 records in 1.8s (561,005 lookups per second)
+1,000,000 records in 1.8s (564,637 lookups per second)
+1,000,000 records in 1.8s (555,541 lookups per second)
+1,000,000 records in 1.8s (557,924 lookups per second)
+1,000,000 records in 1.8s (565,643 lookups per second)
+1,000,000 records in 1.8s (568,964 lookups per second)
+1,000,000 records in 1.8s (566,015 lookups per second)
+1,000,000 records in 1.8s (556,172 lookups per second)
 ```
 
 </details>
 
 <details>
 
-<summary>query().lookup(ip)</summary>
+<summary>query().lookup(ip) vs query("city").lookup(ip)</summary>
 
 ```sh
 $ for i in $(seq 1 10); do
     python benchmarks/query_lookup.py --file=GeoLite2-City.mmdb
   done
 
-1,000,000 records in 3.7s (269,236 lookups per second)
-1,000,000 records in 3.7s (269,311 lookups per second)
-1,000,000 records in 3.7s (269,805 lookups per second)
-1,000,000 records in 3.8s (266,481 lookups per second)
-1,000,000 records in 3.7s (267,394 lookups per second)
-1,000,000 records in 3.7s (266,885 lookups per second)
-1,000,000 records in 3.7s (269,322 lookups per second)
-1,000,000 records in 3.7s (266,788 lookups per second)
-1,000,000 records in 3.8s (266,524 lookups per second)
-1,000,000 records in 3.8s (262,976 lookups per second)
+  echo '---'
+
+  for i in $(seq 1 10); do
+    python benchmarks/query_lookup.py --file=GeoLite2-City.mmdb --fields=city
+  done
+
+1,000,000 records in 3.6s (280,790 lookups per second)
+1,000,000 records in 3.6s (276,033 lookups per second)
+1,000,000 records in 3.6s (277,486 lookups per second)
+1,000,000 records in 3.6s (277,271 lookups per second)
+1,000,000 records in 3.6s (276,642 lookups per second)
+1,000,000 records in 3.6s (277,696 lookups per second)
+1,000,000 records in 3.6s (280,458 lookups per second)
+1,000,000 records in 3.6s (278,194 lookups per second)
+1,000,000 records in 3.6s (275,151 lookups per second)
+1,000,000 records in 3.7s (272,327 lookups per second)
+---
+1,000,000 records in 1.4s (698,274 lookups per second)
+1,000,000 records in 1.4s (695,933 lookups per second)
+1,000,000 records in 1.5s (687,627 lookups per second)
+1,000,000 records in 1.4s (695,669 lookups per second)
+1,000,000 records in 1.4s (698,477 lookups per second)
+1,000,000 records in 1.4s (695,712 lookups per second)
+1,000,000 records in 1.4s (695,234 lookups per second)
+1,000,000 records in 1.4s (707,865 lookups per second)
+1,000,000 records in 1.5s (677,752 lookups per second)
+1,000,000 records in 1.4s (704,295 lookups per second)
 ```
 
 </details>
 
 <details>
 
-<summary>query("city").lookup(ip)</summary>
+<summary>json().lookup(ip) vs json("city").lookup(ip)</summary>
 
 ```sh
 $ for i in $(seq 1 10); do
-    python benchmarks/query_lookup.py --file=GeoLite2-City.mmdb --fields=city
+    python benchmarks/json_lookup.py --file=GeoLite2-City.mmdb
   done
 
-1,000,000 records in 1.5s (649,478 lookups per second)
-1,000,000 records in 1.5s (685,977 lookups per second)
-1,000,000 records in 1.5s (684,136 lookups per second)
-1,000,000 records in 1.5s (684,740 lookups per second)
-1,000,000 records in 1.5s (682,131 lookups per second)
-1,000,000 records in 1.5s (678,160 lookups per second)
-1,000,000 records in 1.5s (674,532 lookups per second)
-1,000,000 records in 1.5s (681,709 lookups per second)
-1,000,000 records in 1.5s (681,175 lookups per second)
-1,000,000 records in 1.5s (674,909 lookups per second)
+  echo '---'
+
+  for i in $(seq 1 10); do
+    python benchmarks/json_lookup.py --file=GeoLite2-City.mmdb --fields=city
+  done
+
+1,000,000 records in 2.0s (508,853 lookups per second)
+1,000,000 records in 1.9s (513,942 lookups per second)
+1,000,000 records in 1.9s (512,896 lookups per second)
+1,000,000 records in 2.0s (505,046 lookups per second)
+1,000,000 records in 2.0s (506,953 lookups per second)
+1,000,000 records in 2.0s (512,477 lookups per second)
+1,000,000 records in 2.0s (510,976 lookups per second)
+1,000,000 records in 2.0s (510,270 lookups per second)
+1,000,000 records in 2.0s (497,465 lookups per second)
+1,000,000 records in 1.9s (513,094 lookups per second)
+---
+1,000,000 records in 1.2s (809,060 lookups per second)
+1,000,000 records in 1.2s (803,894 lookups per second)
+1,000,000 records in 1.3s (774,636 lookups per second)
+1,000,000 records in 1.2s (811,619 lookups per second)
+1,000,000 records in 1.2s (801,847 lookups per second)
+1,000,000 records in 1.3s (798,536 lookups per second)
+1,000,000 records in 1.2s (807,078 lookups per second)
+1,000,000 records in 1.2s (807,707 lookups per second)
+1,000,000 records in 1.2s (812,466 lookups per second)
+1,000,000 records in 1.2s (801,383 lookups per second)
 ```
 
 </details>
@@ -297,10 +342,10 @@ Full GeoLite2-City scan (5.5M records).
 
 | Benchmark              | records per second |
 |---                     |---                 |
-| `scan()`               | ~520K              |
-| `query().scan()`       | ~519K              |
-| `scan(fields="city")`  | ~1,773K            |
-| `query("city").scan()` | ~1,773K            |
+| `scan()`               | ~531K              |
+| `query().scan()`       | ~526K              |
+| `scan(fields="city")`  | ~1,794K            |
+| `query("city").scan()` | ~1,785K            |
 
 <details>
 
@@ -317,73 +362,67 @@ $ for i in $(seq 1 10); do
     python benchmarks/scan.py --file=GeoLite2-City.mmdb --fields=city
   done
 
-5,502,351 records in 10.5s (522,246 records per second)
-5,502,351 records in 10.6s (521,530 records per second)
-5,502,351 records in 10.5s (522,559 records per second)
-5,502,351 records in 10.5s (521,937 records per second)
-5,502,351 records in 10.6s (519,105 records per second)
-5,502,351 records in 10.6s (518,975 records per second)
-5,502,351 records in 10.7s (513,727 records per second)
-5,502,351 records in 10.7s (515,389 records per second)
-5,502,351 records in 10.6s (517,501 records per second)
-5,502,351 records in 10.6s (520,533 records per second)
+5,502,351 records in 10.3s (533,336 records per second)
+5,502,351 records in 10.2s (541,393 records per second)
+5,502,351 records in 10.3s (532,846 records per second)
+5,502,351 records in 10.4s (530,385 records per second)
+5,502,351 records in 10.3s (532,073 records per second)
+5,502,351 records in 10.4s (530,863 records per second)
+5,502,351 records in 10.4s (529,987 records per second)
+5,502,351 records in 10.5s (524,235 records per second)
+5,502,351 records in 10.4s (527,442 records per second)
+5,502,351 records in 10.6s (521,197 records per second)
 ---
-5,502,351 records in 3.1s (1,784,713 records per second)
-5,502,351 records in 3.1s (1,793,877 records per second)
-5,502,351 records in 3.1s (1,780,723 records per second)
-5,502,351 records in 3.1s (1,775,474 records per second)
-5,502,351 records in 3.1s (1,758,084 records per second)
-5,502,351 records in 3.1s (1,760,736 records per second)
-5,502,351 records in 3.1s (1,776,621 records per second)
-5,502,351 records in 3.1s (1,757,925 records per second)
-5,502,351 records in 3.1s (1,768,053 records per second)
-5,502,351 records in 3.1s (1,770,746 records per second)
+5,502,351 records in 3.1s (1,795,802 records per second)
+5,502,351 records in 3.1s (1,798,097 records per second)
+5,502,351 records in 3.1s (1,788,232 records per second)
+5,502,351 records in 3.1s (1,794,434 records per second)
+5,502,351 records in 3.0s (1,804,452 records per second)
+5,502,351 records in 3.1s (1,787,658 records per second)
+5,502,351 records in 3.1s (1,786,531 records per second)
+5,502,351 records in 3.1s (1,796,017 records per second)
+5,502,351 records in 3.1s (1,789,501 records per second)
+5,502,351 records in 3.1s (1,793,517 records per second)
 ```
 
 </details>
 
 <details>
 
-<summary>query().scan()</summary>
+<summary>query().scan() vs query("city").scan()</summary>
 
 ```sh
 $ for i in $(seq 1 10); do
     python benchmarks/query_scan.py --file=GeoLite2-City.mmdb
   done
 
-5,502,351 records in 10.6s (518,620 records per second)
-5,502,351 records in 10.6s (520,308 records per second)
-5,502,351 records in 10.6s (518,037 records per second)
-5,502,351 records in 10.6s (520,462 records per second)
-5,502,351 records in 10.6s (519,904 records per second)
-5,502,351 records in 10.7s (515,143 records per second)
-5,502,351 records in 10.5s (521,716 records per second)
-5,502,351 records in 10.6s (520,407 records per second)
-5,502,351 records in 10.6s (518,381 records per second)
-5,502,351 records in 10.7s (516,606 records per second)
-```
+  echo '---'
 
-</details>
-
-<details>
-
-<summary>query("city").scan()</summary>
-
-```sh
-$ for i in $(seq 1 10); do
+  for i in $(seq 1 10); do
     python benchmarks/query_scan.py --file=GeoLite2-City.mmdb --fields=city
   done
 
-5,502,351 records in 3.1s (1,747,328 records per second)
-5,502,351 records in 3.1s (1,788,840 records per second)
-5,502,351 records in 3.1s (1,779,631 records per second)
-5,502,351 records in 3.1s (1,780,345 records per second)
-5,502,351 records in 3.1s (1,773,505 records per second)
-5,502,351 records in 3.1s (1,772,941 records per second)
-5,502,351 records in 3.1s (1,771,069 records per second)
-5,502,351 records in 3.1s (1,770,072 records per second)
-5,502,351 records in 3.1s (1,756,750 records per second)
-5,502,351 records in 3.1s (1,772,070 records per second)
+5,502,351 records in 10.4s (527,939 records per second)
+5,502,351 records in 10.4s (529,239 records per second)
+5,502,351 records in 10.5s (523,321 records per second)
+5,502,351 records in 10.4s (531,603 records per second)
+5,502,351 records in 10.5s (526,033 records per second)
+5,502,351 records in 10.5s (522,252 records per second)
+5,502,351 records in 10.4s (528,354 records per second)
+5,502,351 records in 10.5s (522,438 records per second)
+5,502,351 records in 10.5s (525,263 records per second)
+5,502,351 records in 10.5s (524,663 records per second)
+---
+5,502,351 records in 3.1s (1,788,935 records per second)
+5,502,351 records in 3.1s (1,782,188 records per second)
+5,502,351 records in 3.1s (1,786,643 records per second)
+5,502,351 records in 3.1s (1,781,621 records per second)
+5,502,351 records in 3.1s (1,786,342 records per second)
+5,502,351 records in 3.1s (1,791,478 records per second)
+5,502,351 records in 3.1s (1,783,888 records per second)
+5,502,351 records in 3.1s (1,781,067 records per second)
+5,502,351 records in 3.1s (1,780,360 records per second)
+5,502,351 records in 3.1s (1,786,614 records per second)
 ```
 
 </details>

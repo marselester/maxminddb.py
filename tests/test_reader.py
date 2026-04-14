@@ -187,6 +187,35 @@ def test_query_too_many_fields(db):
         )
 
 
+def test_json_lookup(db):
+    j = db.json("city")
+    json_str, net = j.lookup("89.160.20.128")
+    assert isinstance(json_str, str)
+    assert '"Karlstad"' in json_str or '"Linköping"' in json_str
+    assert net
+
+
+def test_json_lookup_all_fields(db):
+    j = db.json()
+    json_str, net = j.lookup("89.160.20.128")
+    assert '"city"' in json_str
+    assert '"country"' in json_str
+
+
+def test_json_lookup_not_found(db):
+    j = db.json("city")
+    json_str, net = j.lookup("0.0.0.0")
+    assert (json_str, net) == (None, None)
+
+
+def test_json_after_close():
+    db = maxmind.Reader(TEST_DB)
+    j = db.json("city")
+    db.close()
+    with pytest.raises(maxmind.ReaderException, match="ReaderClosed"):
+        j.lookup("89.160.20.128")
+
+
 def test_lookup_after_close():
     db = maxmind.Reader(TEST_DB)
     db.close()
